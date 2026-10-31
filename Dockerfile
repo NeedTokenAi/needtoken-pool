@@ -6,7 +6,9 @@
 # Stage 2: Build Go backend with embedded frontend
 # Stage 3: Final minimal image
 # =============================================================================
-
+ARG BUILDPLATFORM=linux/amd64
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 ARG NODE_IMAGE=node:24-alpine
 ARG GOLANG_IMAGE=golang:1.27.3-alpine
 ARG ALPINE_IMAGE=alpine:3.21
