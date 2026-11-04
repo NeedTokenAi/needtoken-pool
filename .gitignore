@@ -124,6 +124,12 @@ CLAUDE.md
 scripts
 !backend/scripts/
 !backend/scripts/resolve-version.sh
+!.github/scripts/
+!.github/scripts/needtoken_ops.py
+!.github/scripts/test_needtoken_ops.py
+!.github/scripts/deploy-cloudrun.sh
+!.github/scripts/sync-upstream.sh
+.github/scripts/__pycache__/
 .code-review-state
 #openspec/
 code-reviews/
@@ -146,6 +152,9 @@ docs/*
 !docs/codex-credits.md
 !docs/legal/
 !docs/legal/*.md
+!docs/ops/
+!docs/ops/deploy.md
+!docs/ops/upstream-sync.md
 !docs/screenshots/
 docs/screenshots/*
 !docs/screenshots/mobile-account-actions-menu.png

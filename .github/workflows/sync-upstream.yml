@@ -1,0 +1,40 @@
+name: Sync upstream
+
+# Daily pin of Wei-Shaw/sub2api to one SHA, then one ordinary merge PR.
+# This workflow does not authenticate to GCP and does not deploy.
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Override UPSTREAM_CHANNEL (release, main, or a tag such as v1.2.3)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: needtoken-pool-upstream-sync-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin upstream SHA and open one merge PR
+        env:
+          UPSTREAM_CHANNEL: ${{ inputs.channel || vars.UPSTREAM_CHANNEL }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SYNC_GITHUB_TOKEN: ${{ secrets.SYNC_GITHUB_TOKEN }}
+          ORIGIN_REPO: ${{ github.repository }}
+        run: bash .github/scripts/sync-upstream.sh
