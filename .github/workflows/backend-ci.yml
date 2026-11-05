@@ -1,5 +1,8 @@
 name: CI
 
+# required-checks is the deploy gate. Deploy Cloud Run runs only after this
+# workflow succeeds on a push to main. Add every new job to required-checks.
+
 on:
   push:
   pull_request:
@@ -93,3 +96,29 @@ jobs:
       - run: python -m pip install -r .github/release-tools/requirements-release.txt
       - run: python -m unittest discover -s .github/release-tools -p 'test_release_matrix.py'
       - run: bash -n .github/release-tools/release-images.sh
+
+  ops-infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Ops gate tests
+        run: python -m unittest discover -s .github/scripts -p 'test_needtoken_ops.py'
+      - name: Syntax-check ops scripts
+        run: |
+          bash -n .github/scripts/deploy-cloudrun.sh
+          bash -n .github/scripts/sync-upstream.sh
+
+  required-checks:
+    name: required-checks
+    runs-on: ubuntu-latest
+    needs: [shell, test, frontend, golangci-lint, release-helpers, ops-infra]
+    if: always()
+    steps:
+      - uses: actions/checkout@v6
+      - name: Require every gate job to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 .github/scripts/needtoken_ops.py assert-required-checks

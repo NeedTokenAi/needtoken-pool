@@ -1,0 +1,135 @@
+name: Deploy Cloud Run
+
+# Production deploy for needtoken-pool.
+# Identity is GitHub OIDC to GCP Workload Identity. No JSON keys.
+# Pull requests do not run this workflow and cannot read its cloud identity.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      git_sha:
+        description: "40-character commit SHA on main to build and deploy"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: needtoken-pool-cloudrun-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || 'suichong' }}
+  GCP_REGION: ${{ vars.GCP_REGION || 'asia-southeast1' }}
+  CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE || 'needtoken-pool' }}
+  ARTIFACT_REGISTRY_REPOSITORY: ${{ vars.ARTIFACT_REGISTRY_REPOSITORY || 'needtoken-pool' }}
+  IMAGE_REPOSITORY: ${{ format('{0}-docker.pkg.dev/{1}/{2}/{3}', vars.GCP_REGION || 'asia-southeast1', vars.GCP_PROJECT_ID || 'suichong', vars.ARTIFACT_REGISTRY_REPOSITORY || 'needtoken-pool', vars.CLOUD_RUN_SERVICE || 'needtoken-pool') }}
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.decision.outputs.deploy }}
+      sha: ${{ steps.decision.outputs.sha }}
+      reason: ${{ steps.decision.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Decide whether this SHA can deploy
+        id: decision
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          REF: ${{ github.ref }}
+          INPUT_SHA: ${{ inputs.git_sha }}
+        run: bash .github/scripts/deploy-cloudrun.sh gate
+
+  deploy:
+    needs: resolve
+    if: needs.resolve.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0
+      - name: Verify the pinned checkout
+        env:
+          GIT_SHA: ${{ needs.resolve.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$GIT_SHA"
+      - name: Require Workload Identity configuration
+        env:
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+        run: python3 .github/scripts/needtoken_ops.py validate-wif
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+      - name: Configure Artifact Registry docker auth
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+      - name: Preflight Cloud Run revision
+        id: preflight
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GIT_SHA: ${{ needs.resolve.outputs.sha }}
+        run: bash .github/scripts/deploy-cloudrun.sh preflight
+      - name: Set up Buildx
+        if: steps.preflight.outputs.action == 'build'
+        uses: docker/setup-buildx-action@v4
+      - name: Build and push the pinned digest
+        id: build
+        if: steps.preflight.outputs.action == 'build'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          tags: ${{ env.IMAGE_REPOSITORY }}:sha-${{ needs.resolve.outputs.sha }}
+          build-args: |
+            COMMIT=${{ needs.resolve.outputs.sha }}
+            GOPROXY=https://proxy.golang.org,direct
+            GOSUMDB=sum.golang.org
+          labels: |
+            org.opencontainers.image.revision=${{ needs.resolve.outputs.sha }}
+            org.opencontainers.image.source=https://github.com/NeedTokenAi/needtoken-pool
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Roll out the built digest
+        if: steps.preflight.outputs.action == 'build'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GIT_SHA: ${{ needs.resolve.outputs.sha }}
+          ROLLOUT_MODE: build
+          IMAGE: ${{ format('{0}@{1}', env.IMAGE_REPOSITORY, steps.build.outputs.digest) }}
+        run: bash .github/scripts/deploy-cloudrun.sh rollout
+      - name: Promote the existing revision
+        if: steps.preflight.outputs.action == 'promote'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GIT_SHA: ${{ needs.resolve.outputs.sha }}
+          ROLLOUT_MODE: promote
+          IMAGE: ${{ steps.preflight.outputs.image }}
+        run: bash .github/scripts/deploy-cloudrun.sh rollout
