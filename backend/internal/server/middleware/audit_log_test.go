@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -187,6 +188,50 @@ func TestOllamaCloudUsageSessionRouteOmitsAuditBody(t *testing.T) {
 	require.Len(t, logs, 1)
 	require.Equal(t, "<credential-bearing body omitted>", logs[0].RequestBody)
 	require.NotContains(t, logs[0].RequestBody, "audit-canary")
+}
+
+func TestChatGPTInspectionOmitsMalformedBodyButKeepsOperationAudit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const route = "/api/v1/admin/accounts/:id/chatgpt-inspection"
+	require.Contains(t, auditBodyOmittedRoutes, "POST "+route)
+	repository := &auditCaptureRepository{}
+	auditService := service.NewAuditLogService(repository, nil)
+	auditService.Start()
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(string(ContextKeyUser), AuthSubject{UserID: 77})
+		c.Set(string(ContextKeyUserRole), "admin")
+		c.Set("auth_method", service.AuditAuthMethodAdminAPIKey)
+		c.Next()
+	})
+	router.Use(gin.HandlerFunc(NewAuditLogMiddleware(auditService)))
+	const body = `{"expected_proxy_id":42,"expected_chatgpt_account_id":"audit-canary-token-pasted-as-id","unexpected":"audit-canary-secret"}`
+	router.POST(route, func(c *gin.Context) {
+		data, err := io.ReadAll(c.Request.Body)
+		require.NoError(t, err)
+		require.Equal(t, body, string(data), "audit omission must preserve input for handler validation")
+		c.Status(http.StatusBadRequest)
+	})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/7/chatgpt-inspection", bytes.NewBufferString(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("x-api-key", "admin-key-never-persist-whole")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	auditService.Stop()
+	repository.mu.Lock()
+	logs := append([]*service.AuditLog(nil), repository.logs...)
+	repository.mu.Unlock()
+	require.Len(t, logs, 1)
+	require.Equal(t, "<credential-bearing body omitted>", logs[0].RequestBody)
+	require.NotContains(t, logs[0].RequestBody, "audit-canary")
+	require.Equal(t, http.StatusBadRequest, logs[0].StatusCode)
+	require.Equal(t, http.MethodPost, logs[0].Method)
+	require.Equal(t, route, logs[0].Path)
+	require.NotEmpty(t, logs[0].Action)
+	require.Equal(t, int64(77), *logs[0].ActorUserID)
+	require.Equal(t, service.AuditAuthMethodAdminAPIKey, logs[0].AuthMethod)
+	require.NotEmpty(t, logs[0].CredentialMasked)
+	require.NotContains(t, logs[0].CredentialMasked, "admin-key-never-persist-whole")
 }
 
 // MCP OAuth 是机器凭证：只读工具同样可以批量读取邮箱等数据，必须全部入审计并带上 grant。

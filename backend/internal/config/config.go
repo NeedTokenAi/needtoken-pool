@@ -68,6 +68,10 @@ const DefaultUpstreamResponseReadMaxBytes int64 = 128 * 1024 * 1024
 const DefaultModelsListReadMaxBytes int64 = 8 * 1024 * 1024
 
 type Config struct {
+	// ChatGPTInspectionPolicies is a startup-only JSON allowlist for the isolated
+	// own-account read probe. Empty disables the endpoint; it contains no tokens.
+	ChatGPTInspectionPolicies string `mapstructure:"chatgpt_inspection_policies"`
+
 	Server                  ServerConfig                  `mapstructure:"server"`
 	Log                     LogConfig                     `mapstructure:"log"`
 	CORS                    CORSConfig                    `mapstructure:"cors"`
@@ -2702,6 +2706,8 @@ func setDefaults() {
 // environment. Any subsystem that wants a richer default still applies it after
 // unmarshal, exactly as before.
 func setEnvReachableDefaults() {
+	viper.SetDefault("chatgpt_inspection_policies", "")
+	_ = viper.BindEnv("chatgpt_inspection_policies", "SUB2API_CHATGPT_INSPECTION_POLICIES")
 	viper.SetDefault("gateway.forced_codex_instructions_template_file", "")
 	viper.SetDefault("gateway.session_idle_timeout_minutes", 0)
 	viper.SetDefault("gateway.user_message_queue.mode", "")

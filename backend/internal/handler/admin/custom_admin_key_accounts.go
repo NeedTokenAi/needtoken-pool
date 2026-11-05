@@ -70,6 +70,10 @@ func (h *AccountHandler) ScopedAdminKeyAccounts(c *gin.Context) {
 		h.scopedAdminImportCodexSession(c)
 		return
 	}
+	if path == base+"/:id/chatgpt-inspection" && c.Request.Method == "POST" {
+		h.InspectChatGPTAccount(c)
+		return
+	}
 	api, ok := h.adminService.(service.ScopedAdminAccounts)
 	if !ok {
 		response.Error(c, 503, "受限账户服务不可用")
