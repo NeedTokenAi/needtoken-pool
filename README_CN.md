@@ -761,6 +761,24 @@ OAuth / Setup Token 图片请求使用 Responses 主控模型调用 `image_gener
 
 ---
 
+## 自有 ChatGPT 账号只读检查
+
+可选接口 `POST /api/v1/admin/accounts/:id/chatgpt-inspection` 使用已存在的自有 OpenAI OAuth 账号及其当前固定代理，只读取账号、套餐与到期日。不会刷新凭据、修改隐私设置、导入号池、购买订阅或证明 Apple 交易归属。
+
+默认关闭。通过启动环境变量 `SUB2API_CHATGPT_INSPECTION_POLICIES`，或 YAML 字符串 `chatgpt_inspection_policies` 配置精确白名单，重启后生效：
+
+```json
+[{"account_id":11,"proxy_id":42,"chatgpt_account_id":"owned-target-account-id"}]
+```
+
+格式错误、重复账号或未知字段会使整个检查能力关闭。原账号须为启用的 OpenAI OAuth 非影子账号；代理须与白名单一致、启用且未过期，`fallback_mode=none`、没有备用代理。检查接口拒绝直连与自动选代理，不改写现有配置。
+
+管理员会话可调用；受限管理密钥须单独授予 `accounts.subscription.inspect`，并匹配账号的 OAuth 类型、OpenAI 平台及私有测试分组。`accounts.read`、`ops.read` 不包含此权限。现有分组授权不支持单个账号 ID，启动白名单另行限制精确账号。密钥管理界面会从后端目录加载新权限。
+
+请求只允许 `expected_proxy_id` 和 `expected_chatgpt_account_id`，与上面的白名单对应。短期 Token 和代理认证始终留在 Sub2API 内部；只请求固定 HTTPS 读取端点，不跟随重定向、不持久化 Cookie。读取后重新核对账号凭据、代理绑定及配置，发现变化则丢弃结果；审计不保存本接口请求正文。
+
+成功读取也只返回账号及证据摘要、套餐和已知到期日，保持 `status=blocked`、`code=apple_transaction_ownership_unverified`、`mvp0_passed=false`、`actual_egress_ip_verified=false`。固定代理配置不代表已证明多个系统的实际出口 IP 相同，不能据此完成 IAP 履约或开放销售。
+
 ## TypeSafe / Jev 使用说明
 
 Sub2API 支持使用 TypeSafe API Key 账户，通过 Jev 原生、非流式的 System One 协议调用模型。

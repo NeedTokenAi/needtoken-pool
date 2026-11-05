@@ -751,6 +751,32 @@ Simple Mode is designed for individual developers or internal teams who want qui
 
 ---
 
+## Owned-account ChatGPT read-only inspection
+
+The optional `POST /api/v1/admin/accounts/:id/chatgpt-inspection` endpoint reads an existing owned OpenAI OAuth account through its currently assigned proxy. It does not refresh credentials, change privacy settings, import credentials, purchase subscriptions, or prove Apple transaction ownership.
+
+It is disabled by default. Set the startup-only environment variable `SUB2API_CHATGPT_INSPECTION_POLICIES` (or YAML string `chatgpt_inspection_policies`) to an exact allowlist, then restart:
+
+```json
+[{"account_id":11,"proxy_id":42,"chatgpt_account_id":"owned-target-account-id"}]
+```
+
+Malformed, duplicate or unknown policy fields disable the entire inspection capability. The existing account must be active, OpenAI OAuth, and not a credential shadow. Its proxy must match the policy, be active and unexpired, with `fallback_mode=none` and no backup proxy. The endpoint rejects direct/automatic selection; it never modifies these settings.
+
+Use an administrator session or a restricted management key with the separate `accounts.subscription.inspect` permission and matching OAuth/platform/private-group rules. `accounts.read` and `ops.read` do not grant this permission. Existing group policies do not support an exact account-ID filter; the additional server allowlist provides that pin. The key-management UI loads this permission from the backend catalog.
+
+```http
+POST /api/v1/admin/accounts/11/chatgpt-inspection
+X-API-Key: <restricted management key supplied by the client>
+Content-Type: application/json
+
+{"expected_proxy_id":42,"expected_chatgpt_account_id":"owned-target-account-id"}
+```
+
+Only these two request fields are accepted. The server keeps the access token and proxy credentials internal, performs fixed HTTPS GETs without redirects or cookie persistence, and discards observations if the account credential or proxy identity changes during the read. Responses contain account/evidence digests, plan and known expiry; request bodies are omitted from audit logs.
+
+Even a successful read returns `status=blocked`, `code=apple_transaction_ownership_unverified`, `read_only=true`, `mvp0_passed=false`, and `actual_egress_ip_verified=false`. A verified configured proxy pin does not establish a fixed public IP across Sub2API, AppleAuto, or other systems. This endpoint cannot complete an IAP fulfillment order or enable sales.
+
 ## Asynchronous Image Tasks
 
 Long-running OpenAI/Grok image generation and editing can be submitted through `/v1/images/generations/async` or `/v1/images/edits/async`, then polled at `/v1/images/tasks/{task_id}` without holding a CDN connection open. See [Asynchronous Image Tasks](docs/ASYNC_IMAGE_TASKS.md) for request and response examples.

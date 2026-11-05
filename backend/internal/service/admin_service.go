@@ -717,6 +717,12 @@ type adminServiceImpl struct {
 	compositeResolver    *CompositeRouteResolver
 	// 分组平台变更后用来失效渠道缓存；可为 nil（缓存会在 TTL 到期后自然重建）
 	channelCacheInvalidator ChannelCacheInvalidator
+
+	chatGPTInspectionPolicies      map[int64]chatGPTInspectionPolicy
+	chatGPTInspectionPolicyInvalid bool
+	// Dependency injection for deterministic transport tests only. Production
+	// uses the existing generic HTTP client with an explicit captured proxy.
+	chatGPTInspectionClient func(string) (*http.Client, error)
 }
 
 // ChannelCacheInvalidator 失效渠道缓存。
@@ -759,7 +765,11 @@ func NewAdminService(
 	compositeResolver *CompositeRouteResolver,
 	channelCacheInvalidator ChannelCacheInvalidator,
 ) AdminService {
+	inspectionPolicies, inspectionPolicyErr := parseChatGPTInspectionPolicies(cfg)
 	return &adminServiceImpl{
+		chatGPTInspectionPolicies:      inspectionPolicies,
+		chatGPTInspectionPolicyInvalid: inspectionPolicyErr != nil,
+
 		cfg:                  cfg,
 		userRepo:             userRepo,
 		groupRepo:            groupRepo,
