@@ -126,9 +126,10 @@ func chatGPTInspectionAccessToken(token string) bool {
 		return false
 	}
 	for _, ch := range token {
-		if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || strings.ContainsRune("-._~+/=", ch)) {
-			return false
+		if ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || strings.ContainsRune("-._~+/=", ch) {
+			continue
 		}
+		return false
 	}
 	return true
 }
@@ -146,7 +147,7 @@ func (c *chatGPTInspectionReader) read(ctx context.Context, token, endpoint stri
 	if err != nil {
 		return nil, errChatGPTInspectionUnavailable
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if strings.EqualFold(strings.TrimSpace(resp.Header.Get("cf-mitigated")), "challenge") {
 		return nil, errChatGPTInspectionChallenge
 	}
@@ -217,9 +218,10 @@ func normalizeChatGPTInspectionPlan(raw string) (string, error) {
 		return "", errChatGPTInspectionResponse
 	}
 	for _, ch := range raw {
-		if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '_' || ch == '-') {
-			return "", errChatGPTInspectionResponse
+		if ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '_' || ch == '-' {
+			continue
 		}
+		return "", errChatGPTInspectionResponse
 	}
 	return strings.ToLower(raw), nil
 }
