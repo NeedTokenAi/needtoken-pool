@@ -1,0 +1,140 @@
+name: Pool read-only probe artifact
+
+on:
+  push:
+    branches: ['codex/pool-probe-artifact']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pool-readonly-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      PROBE_IMAGE: needtoken-pool-readonly-probe:${{ github.sha }}
+      SOURCE_REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility || 'unknown' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - name: Build native Linux amd64 image without publication
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          probe_version="0.0.0-probe.${GITHUB_SHA:0:12}"
+          docker buildx build --platform linux/amd64 --load \
+            --file Dockerfile --tag "$PROBE_IMAGE" \
+            --build-arg "VERSION=$probe_version" \
+            --build-arg "COMMIT=$GITHUB_SHA" \
+            --build-arg GOPROXY=https://proxy.golang.org \
+            --build-arg GOSUMDB=sum.golang.org \
+            --build-arg NPM_CONFIG_REGISTRY=https://registry.npmjs.org \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            .
+      - name: Smoke bundled versions without starting services
+        run: |
+          set -euo pipefail
+          mkdir -p probe-artifact
+          # --version returns before setup, migrations and background services.
+          docker run --rm --network=none --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 \
+            --entrypoint /app/sub2api "$PROBE_IMAGE" --version \
+            > probe-artifact/version.txt 2>&1
+          docker run --rm --network=none --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 \
+            --entrypoint /usr/local/bin/pg_dump "$PROBE_IMAGE" --version \
+            > probe-artifact/pg_dump-version.txt 2>&1
+          docker run --rm --network=none --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 \
+            --entrypoint /usr/local/bin/psql "$PROBE_IMAGE" --version \
+            > probe-artifact/psql-version.txt 2>&1
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          text = Path("probe-artifact/version.txt").read_text()
+          sha = os.environ["GITHUB_SHA"]
+          if f"Sub2API 0.0.0-probe.{sha[:12]}" not in text or f"commit: {sha}" not in text:
+              raise SystemExit("version smoke did not match the selected source")
+          for tool in ("pg_dump", "psql"):
+              if not Path(f"probe-artifact/{tool}-version.txt").read_text().strip().startswith(f"{tool} (PostgreSQL) "):
+                  raise SystemExit("bundled PostgreSQL tool version smoke failed")
+          PY
+      - name: Export image and provenance
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$PROBE_IMAGE")" = linux/amd64
+          docker image inspect --format '{{.Id}}' "$PROBE_IMAGE" > probe-artifact/image-id.txt
+          docker save --output probe-artifact/pool-readonly-probe-linux-amd64.tar "$PROBE_IMAGE"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          directory = Path("probe-artifact")
+          archive = directory / "pool-readonly-probe-linux-amd64.tar"
+          digest = hashlib.sha256()
+          with archive.open("rb") as stream:
+              for block in iter(lambda: stream.read(1024 * 1024), b""):
+                  digest.update(block)
+          sha = os.environ["GITHUB_SHA"]
+          manifest = {
+              "schema_version": 1,
+              "artifact_type": "sub2api-readonly-probe-docker-archive",
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "source_commit": sha,
+              "source_ref": os.environ["GITHUB_REF"],
+              "workflow_run": f'{os.environ["GITHUB_SERVER_URL"]}/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
+              "platform": "linux/amd64",
+              "build_version": f"0.0.0-probe.{sha[:12]}",
+              "image_id": (directory / "image-id.txt").read_text().strip(),
+              "archive": {"filename": archive.name, "sha256": digest.hexdigest(), "bytes": archive.stat().st_size},
+              "smoke": {"argument": "--version", "tools": ["sub2api", "pg_dump", "psql"], "network": "none", "root_filesystem": "read-only", "user": "1000:1000", "passed": True},
+              "backup_client_versions": {tool: (directory / f"{tool}-version.txt").read_text().strip() for tool in ("pg_dump", "psql")},
+              "artifact_access": "inherits_repository_access",
+              "source_repository_visibility": os.environ["SOURCE_REPOSITORY_VISIBILITY"],
+              "retention_days": 3,
+              "runtime_configuration_injected": False,
+              "registry_published": False,
+              "github_release_created": False,
+              "deployed": False,
+              "mvp0_passed": False,
+          }
+          (directory / "provenance.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          (directory / "SHA256SUMS").write_text(f"{digest.hexdigest()}  {archive.name}\n")
+          PY
+      - name: Upload build-only artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: pool-readonly-probe-linux-amd64-${{ github.sha }}
+          path: |
+            probe-artifact/pool-readonly-probe-linux-amd64.tar
+            probe-artifact/provenance.json
+            probe-artifact/SHA256SUMS
+            probe-artifact/image-id.txt
+            probe-artifact/version.txt
+            probe-artifact/pg_dump-version.txt
+            probe-artifact/psql-version.txt
+          if-no-files-found: error
+          retention-days: 3
+      - name: Summarize artifact boundaries
+        run: |
+          set -euo pipefail
+          {
+            echo '### Build-only read-only inspection image'
+            echo "Source commit: \`$GITHUB_SHA\`"
+            echo ''
+            echo 'Artifact access follows repository permissions; retention is three days.'
+            echo 'The image contains compiled repository code and build provenance; no runtime configuration was injected.'
+            echo 'No registry push, release, deployment, real-account request or purchase was performed.'
+          } >> "$GITHUB_STEP_SUMMARY"
