@@ -1,6 +1,8 @@
 package service
 
 import (
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -126,6 +128,20 @@ func TestOpenAIResponsesOrphanPrecheckCompatibilityErrors(t *testing.T) {
 }
 
 func TestOpenAIResponsesOrphanPrecheckLargeEscapedContent(t *testing.T) {
+	// AllocsPerRun reads process-wide mallocs. go test runs packages in
+	// parallel, and a preempted measurement then counts another package's
+	// allocations. CI saw 30 and then 18 for the same input. Re-exec this
+	// test alone so the count belongs to this function.
+	if os.Getenv("SUB2API_ORPHAN_PRECHECK_ALLOC") != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestOpenAIResponsesOrphanPrecheckLargeEscapedContent$", "-test.count=1", "-test.v")
+		cmd.Env = append(os.Environ(), "SUB2API_ORPHAN_PRECHECK_ALLOC=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "--- PASS: TestOpenAIResponsesOrphanPrecheckLargeEscapedContent") {
+			t.Fatalf("allocation check in an isolated process failed: %v\n%s", err, out)
+		}
+		return
+	}
+
 	body := []byte(`{"vendor":"` + strings.Repeat(`\n\"`, 1<<16) + `","input":[{"content":"` + strings.Repeat(`\n\"`, 1<<16) + `","type":"message"}]}`)
 	require.False(t, openAIResponsesInputMayNeedOrphanCleanup(body))
 	allocations := testing.AllocsPerRun(5, func() {
