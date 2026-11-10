@@ -133,6 +133,7 @@ func TestOpenAIResponsesOrphanPrecheckLargeEscapedContent(t *testing.T) {
 	// allocations. CI saw 30 and then 18 for the same input. Re-exec this
 	// test alone so the count belongs to this function.
 	if os.Getenv("SUB2API_ORPHAN_PRECHECK_ALLOC") != "1" {
+		//nolint:gosec // G702: 只重新执行当前测试二进制，参数是固定的 -test.run，不是外部输入
 		cmd := exec.Command(os.Args[0], "-test.run=^TestOpenAIResponsesOrphanPrecheckLargeEscapedContent$", "-test.count=1", "-test.v")
 		cmd.Env = append(os.Environ(), "SUB2API_ORPHAN_PRECHECK_ALLOC=1")
 		out, err := cmd.CombinedOutput()
