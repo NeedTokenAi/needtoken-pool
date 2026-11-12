@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { REGISTRY_IMAGE_REF } from "./src/runtime.js";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -94,15 +95,33 @@ export function assertCandidateWorkflow(workflowText) {
   }
 }
 
-export function bindCandidate({ mainSha, digest, originMainSha, buildSourceSha, headSha }) {
+export function assertStagingImageWorkflow(workflowText) {
+  if (!/^on:\n {2}workflow_dispatch:\n/.test(workflowText) && !workflowText.includes("workflow_dispatch:")) {
+    throw new Error("staging image workflow must be workflow_dispatch only");
+  }
+  if (/^\s*push\s*:/m.test(workflowText) || /^\s*tags\s*:/m.test(workflowText) || /^\s*pull_request\s*:/m.test(workflowText)) {
+    throw new Error("staging image workflow must not run on push, pull request, or tags");
+  }
+  if (!workflowText.includes("containers build") || !workflowText.includes("digest=")) {
+    throw new Error("staging image workflow must build an image and output the digest");
+  }
+  if (workflowText.toLowerCase().includes("rollback is possible")) {
+    throw new Error("rollback is not available");
+  }
+}
+
+export function bindCandidate({ mainSha, digest, originMainSha, buildSourceSha, headSha, runId }) {
   if (!/^[0-9a-f]{40}$/.test(mainSha ?? "")) {
     throw new Error("main SHA must be 40 hex characters");
   }
-  if (!/^sha256:[0-9a-f]{64}$/.test(digest ?? "")) {
-    throw new Error("image digest must be sha256 and 64 hex characters");
+  if (/^sha256:[0-9a-f]{64}$/.test(digest ?? "") || digest === PLACEHOLDER_DIGEST) {
+    throw new Error("bare sha256 stays fail-closed");
   }
-  if (digest === PLACEHOLDER_DIGEST) {
-    throw new Error("placeholder digest stays fail-closed");
+  if (!REGISTRY_IMAGE_REF.test(digest ?? "")) {
+    throw new Error("digest must be a full registry ref");
+  }
+  if (!/^[1-9][0-9]+$/.test(runId ?? "")) {
+    throw new Error("build run id is required");
   }
   if (!/^[0-9a-f]{40}$/.test(buildSourceSha ?? "")) {
     throw new Error("digest build source SHA is required");
@@ -117,8 +136,10 @@ export function bindCandidate({ mainSha, digest, originMainSha, buildSourceSha, 
     mainSha,
     digest,
     buildSourceSha,
+    runId,
     deployed: false,
     rollback: false,
+    authorizesBoot: false,
     pgDump: PG_DUMP_STATUS,
   };
 }
@@ -152,9 +173,23 @@ export function selfTest() {
       throw new Error("secret bindings are names only");
     }
   }
-  if (!index.includes("singletonName") || !index.includes("getByName")) {
+  if (!index.includes("singletonName") || !index.includes("getByName") || !index.includes("approved: gate.approved")) {
     throw new Error("worker must route one code-enforced singleton");
   }
+  const staging = read("cloudflare/wrangler.staging.jsonc");
+  const stagingConfig = assertDurableObjectPolicy(staging);
+  if (stagingConfig.name !== "needtoken-pool-staging") {
+    throw new Error("staging worker name must use the -staging suffix");
+  }
+  if (stagingConfig.routes || stagingConfig.route || stagingConfig.workers_dev !== false) {
+    throw new Error("staging config must not publish a production route");
+  }
+  const imageWorkflow = read(".github/workflows/cloudflare-staging-image.yml");
+  assertStagingImageWorkflow(imageWorkflow);
+  assertNoPublisher([
+    ["cloudflare-staging-image.yml", imageWorkflow],
+    ["wrangler.staging.jsonc", staging],
+  ]);
   if (workflow.toLowerCase().includes("rollback is possible")) {
     throw new Error("rollback is not available");
   }
@@ -181,6 +216,7 @@ if (isMain) {
       originMainSha: argument("--origin-main"),
       buildSourceSha: argument("--build-source-sha"),
       headSha: argument("--head"),
+      runId: argument("--run-id"),
     });
     console.log(`bound ${bound.mainSha} ${bound.digest} deployed=${bound.deployed} rollback=${bound.rollback} pg_dump=${bound.pgDump}`);
   } else {

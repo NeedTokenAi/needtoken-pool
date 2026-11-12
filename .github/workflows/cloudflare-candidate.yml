@@ -16,6 +16,10 @@ on:
         description: git SHA that built the image digest
         required: true
         type: string
+      run_id:
+        description: Actions run id that built the image
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -46,4 +50,5 @@ jobs:
             --digest "${{ inputs.image_digest }}" \
             --origin-main "$(git rev-parse origin/main)" \
             --build-source-sha "${{ inputs.build_source_sha }}" \
-            --head "$(git rev-parse HEAD)"
+            --head "$(git rev-parse HEAD)" \
+            --run-id "${{ inputs.run_id }}"

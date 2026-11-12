@@ -1,0 +1,45 @@
+{
+  // Isolated staging worker. Not a production route and not a cutover.
+  // durable_object is public beta. No custom domain is set here.
+  "name": "needtoken-pool-staging",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-12",
+  "workers_dev": false,
+  "containers": [
+    {
+      "class_name": "PoolContainer",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "pool": {
+          "dockerfile": "../Dockerfile",
+          "build_context": ".."
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "POOL",
+        "class_name": "PoolContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "pool-staging-sqlite",
+      "new_sqlite_classes": ["PoolContainer"]
+    }
+  ],
+  "exports": {
+    "PoolContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "vars": {
+    "SUB2API_RUNTIME": "cloudflare",
+    "SKIP_SETUP": "true",
+    "SUB2API_ISOLATION": "isolated"
+  }
+}

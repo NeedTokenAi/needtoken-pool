@@ -45,7 +45,11 @@ func useCloudflareDataDir(t *testing.T, dir string) {
 	t.Setenv("SUB2API_RUNTIME", "cloudflare")
 	t.Setenv("SKIP_SETUP", "true")
 	t.Setenv("SUB2API_ISOLATION", "isolated")
-	t.Setenv("SUB2API_WRITER_PERMIT", "isolated")
+	t.Setenv("SUB2API_WRITER_PERMIT", "pool-writer-permit-fixture")
+	t.Setenv("DATABASE_HOST", "isolated-pool-db.example")
+	t.Setenv("REDIS_HOST", "isolated-pool-redis.example")
+	t.Setenv("POOL_ISOLATED_DATABASE_HOSTS", "isolated-pool-db.example")
+	t.Setenv("POOL_ISOLATED_REDIS_HOSTS", "isolated-pool-redis.example")
 }
 
 func writeInjectedConfig(t *testing.T, dir string) []byte {
@@ -266,10 +270,19 @@ func TestCloudflarePermitGatesWorkAndRelease(t *testing.T) {
 		return nil
 	})
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "SUB2API_WRITER_PERMIT=isolated")
+	require.Contains(t, err.Error(), "non-test writer permit")
 	require.False(t, called)
 
 	t.Setenv("SUB2API_WRITER_PERMIT", "isolated")
+	err = BeginProcessWork(func() error {
+		called = true
+		return nil
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "non-test writer permit")
+	require.False(t, called)
+
+	t.Setenv("SUB2API_WRITER_PERMIT", "pool-writer-permit-fixture")
 	t.Setenv("SUB2API_ISOLATION", "")
 	err = BeginProcessWork(func() error {
 		called = true
@@ -322,4 +335,40 @@ func TestCloudflarePermitGatesWorkAndRelease(t *testing.T) {
 	require.True(t, lease.Released())
 	require.False(t, lease.Held())
 	require.True(t, lease.RefuseHTTP())
+}
+
+func TestCloudflareIsolatedHostRejectsProductionAndMarker(t *testing.T) {
+	dir := t.TempDir()
+	writeInjectedConfig(t, dir)
+	useCloudflareDataDir(t, dir)
+
+	for _, host := range []string{
+		"prod-pool-db.example",
+		"prod-pool-db.example-isolated",
+		"prod-pool-db.exampleisolated",
+		"isolated-pool-db.example.extra",
+	} {
+		t.Run(host, func(t *testing.T) {
+			t.Setenv("DATABASE_HOST", host)
+			called := false
+			err := BeginProcessWork(func() error {
+				called = true
+				return nil
+			})
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "DATABASE_HOST")
+			require.False(t, called)
+		})
+	}
+
+	t.Setenv("DATABASE_HOST", "isolated-pool-db.example")
+	t.Setenv("POOL_ISOLATED_DATABASE_HOSTS", `["isolated-pool-db.example"]`)
+	called := false
+	err := BeginProcessWork(func() error {
+		called = true
+		return nil
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "DATABASE_HOST")
+	require.False(t, called)
 }

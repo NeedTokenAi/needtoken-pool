@@ -15,6 +15,7 @@ import {
   createSession,
   handleRequest,
   planRecovery,
+  sessionFromContainer,
   proxyResponse,
   resolveSingletonId,
   schedulerWait,
@@ -22,11 +23,34 @@ import {
   startOptions,
 } from "./runtime.js";
 
-const DIGEST = `sha256:${"ab".repeat(32)}`;
-const PREVIOUS = `sha256:${"cd".repeat(32)}`;
 const SHA = "a".repeat(40);
 const PREVIOUS_SHA = "b".repeat(40);
-const APPROVED = [{ role: "current", digest: DIGEST, sha: SHA }];
+const RUN_ID = "43174764702";
+const IMAGE = `registry.cloudflare.com/example-account/needtoken-pool@sha256:${"ab".repeat(32)}`;
+const PREVIOUS = `registry.cloudflare.com/example-account/needtoken-pool@sha256:${"cd".repeat(32)}`;
+const REPO = "NeedTokenAi/needtoken-pool";
+
+function isolatedEnv(overrides = {}) {
+  return {
+    SUB2API_ISOLATION: "isolated",
+    SUB2API_WRITER_PERMIT: "pool-writer-permit-fixture",
+    DATABASE_HOST: "isolated-pool-db.example",
+    REDIS_HOST: "isolated-pool-redis.example",
+    POOL_ISOLATED_DATABASE_HOSTS: "isolated-pool-db.example",
+    POOL_ISOLATED_REDIS_HOSTS: "isolated-pool-redis.example",
+    POOL_BUILD_REPOSITORY: REPO,
+    POOL_BUILD_SHA: SHA,
+    POOL_BUILD_RUN_ID: RUN_ID,
+    POOL_BUILD_DIGEST: IMAGE,
+    JWT_SECRET: "fixture-value",
+    ...overrides,
+  };
+}
+
+function approvedFor(env = isolatedEnv()) {
+  const gate = sessionFromContainer({ container: { images: { pool: env.POOL_BUILD_DIGEST } } }, env);
+  return gate.approved;
+}
 
 function memoryStorage() {
   const values = new Map();
@@ -54,7 +78,7 @@ function fakeContainer() {
   const container = {
     signals,
     timeouts,
-    images: { pool: DIGEST },
+    images: { pool: IMAGE },
     failStart: false,
     exitCode: 0,
     get running() {
@@ -139,16 +163,18 @@ function sessionWith(overrides = {}) {
   const container = overrides.container ?? fakeContainer();
   const storage = overrides.storage ?? memoryStorage();
   const port = overrides.port ?? healthPort([200]);
+  const env = overrides.env ?? isolatedEnv();
   const session = createSession({
     container,
     images: container.images,
     port,
     storage,
     now: () => 1_000,
-    approved: overrides.approved ?? APPROVED,
+    approved: overrides.approved ?? approvedFor({ ...env, POOL_BUILD_DIGEST: container.images.pool }),
     readiness: overrides.readiness ?? { attempts: 3, wait: async () => {} },
-    secretBindings: overrides.secretBindings,
-    env: overrides.env,
+    secretBindings: overrides.secretBindings ?? env,
+    env,
+    permit: overrides.permit,
   });
   return { session, container, storage, port };
 }
@@ -162,11 +188,13 @@ test("routes every request to the code-enforced singleton", () => {
   assert.match(index, /resolveSingletonId\(singletonName\(request\)\)/);
   assert.match(index, /getByName\(name\)/);
   assert.doesNotMatch(index, /idFromName\(request/);
+  assert.match(index, /sessionFromContainer\(ctx, env\)/);
+  assert.match(index, /approved: gate\.approved/);
 });
 
 test("start options use an approved digest and isolated bindings", () => {
-  const options = startOptions({ pool: DIGEST }, { JWT_SECRET: "fixture-value" }, APPROVED);
-  assert.equal(options.image, DIGEST);
+  const options = startOptions({ pool: IMAGE }, isolatedEnv(), approvedFor());
+  assert.equal(options.image, IMAGE);
   assert.equal(options.enableInternet, true);
   assert.deepEqual(options.instance, INSTANCE);
   assert.equal(options.instance.vcpu >= 0.0625, true);
@@ -180,12 +208,12 @@ test("start options use an approved digest and isolated bindings", () => {
   assert.equal(options.env.SUB2API_RUNTIME, "cloudflare");
   assert.equal(options.env.SKIP_SETUP, "true");
   assert.equal(options.env.SUB2API_ISOLATION, "isolated");
-  assert.equal(options.env.SUB2API_WRITER_PERMIT, "isolated");
+  assert.equal(options.env.SUB2API_WRITER_PERMIT, "pool-writer-permit-fixture");
   assert.equal(Object.hasOwn(options.env, "AUTO_SETUP"), false);
   assert.equal(options.env.JWT_SECRET, "fixture-value");
-  assert.throws(() => containerEnv({ JWT_SECRET: "" }), /refusing empty secret binding/);
-  assert.throws(() => containerEnv({ SUB2API_WRITER_PERMIT: "production" }), /isolated bindings only/);
-  assert.throws(() => startOptions({ pool: DIGEST }, {}, []), /not tied to a build source/);
+  assert.throws(() => containerEnv({ ...isolatedEnv(), JWT_SECRET: "" }), /refusing empty secret binding/);
+  assert.throws(() => containerEnv({ ...isolatedEnv(), SUB2API_WRITER_PERMIT: "production" }), /non-test/);
+  assert.throws(() => startOptions({ pool: IMAGE }, isolatedEnv(), []), /not tied to a build source/);
   assert.throws(
     () => startOptions({ pool: `sha256:${"0".repeat(64)}` }, {}, [{
       role: "current",
@@ -417,7 +445,7 @@ test("losing the isolated permit stops writers and drains before release", async
   assert.equal(session.state.permit.stopsOldProduction, false);
   assert.throws(() => createSession({
     container: fakeContainer(),
-    images: { pool: DIGEST },
+    images: { pool: IMAGE },
     port: healthPort([200]),
     storage: memoryStorage(),
     env: { SUB2API_ISOLATION: "production", SUB2API_WRITER_PERMIT: "production" },
@@ -426,7 +454,7 @@ test("losing the isolated permit stops writers and drains before release", async
 
 test("constructor refreshes the inactivity timeout and arms an alarm", async () => {
   const container = fakeContainer();
-  container.start(startOptions(container.images, {}, APPROVED));
+  container.start(startOptions(container.images, isolatedEnv(), approvedFor()));
   const { session, storage } = sessionWith({ container });
   await session.onStart();
   assert.equal(container.timeouts.at(-1), INACTIVITY_TIMEOUT_MS);
@@ -435,15 +463,16 @@ test("constructor refreshes the inactivity timeout and arms an alarm", async () 
 });
 
 test("two recorded digests are not a rollback", () => {
-  const one = planRecovery(APPROVED);
+  const current = approvedFor()[0];
+  const one = planRecovery([current]);
   assert.equal(one.executable, false);
   assert.equal(one.performsRollback, false);
   assert.equal(one.previousRecorded, false);
   assert.match(one.reason, /not available/);
 
   const two = planRecovery([
-    ...APPROVED,
-    { role: "previous", digest: PREVIOUS, sha: PREVIOUS_SHA },
+    current,
+    { role: "previous", digest: PREVIOUS, sha: PREVIOUS_SHA, repo: REPO, runId: "43174764703" },
   ]);
   assert.equal(two.previousRecorded, true);
   assert.equal(two.executable, false);
@@ -457,18 +486,57 @@ test("two recorded digests are not a rollback", () => {
   assert.equal(LIMITS.rollbackPerformed, false);
 });
 
+test("formal openSession approval rejects a bare digest, hand-filled JSON, and a production host", () => {
+  const env = isolatedEnv();
+  const gate = sessionFromContainer({ container: { images: { pool: IMAGE } } }, env);
+  assert.equal(gate.approved[0].digest, IMAGE);
+  assert.equal(gate.image, IMAGE);
+  assert.throws(
+    () => sessionFromContainer(
+      { container: { images: { pool: `sha256:${"ab".repeat(32)}` } } },
+      isolatedEnv({ POOL_BUILD_DIGEST: `sha256:${"ab".repeat(32)}` }),
+    ),
+    /bare sha256/,
+  );
+  assert.throws(
+    () => sessionFromContainer(
+      { container: { images: { pool: IMAGE } } },
+      { ...env, POOL_BUILD_RECORD: JSON.stringify({ digest: IMAGE, sha: SHA, repo: REPO, runId: RUN_ID }) },
+    ),
+    /hand-filled JSON/,
+  );
+  assert.throws(
+    () => sessionFromContainer(
+      { container: { images: { pool: PREVIOUS } } },
+      env,
+    ),
+    /does not equal ctx\.container\.images\.pool/,
+  );
+  for (const host of ["prod-pool-db.example", "prod-pool-db.example-isolated", "prod-pool-db.exampleisolated"]) {
+    assert.throws(
+      () => sessionFromContainer(
+        { container: { images: { pool: IMAGE } } },
+        isolatedEnv({ DATABASE_HOST: host }),
+      ),
+      /DATABASE_HOST/,
+    );
+  }
+});
+
 test("candidate check ties the digest to its build source and does not deploy", () => {
   const sha = "35e730955c955a4901619fa9a92c68904afcb934";
-  const digest = `sha256:${"cd".repeat(32)}`;
+  const digest = `registry.cloudflare.com/example-account/needtoken-pool@sha256:${"cd".repeat(32)}`;
   const bound = bindCandidate({
     mainSha: sha,
     digest,
     originMainSha: sha,
     buildSourceSha: sha,
     headSha: sha,
+    runId: RUN_ID,
   });
   assert.equal(bound.deployed, false);
   assert.equal(bound.rollback, false);
+  assert.equal(bound.authorizesBoot, false);
   assert.equal(bound.pgDump, "unverified");
   assert.equal(bound.buildSourceSha, sha);
   assert.throws(
@@ -478,6 +546,7 @@ test("candidate check ties the digest to its build source and does not deploy", 
       originMainSha: sha,
       buildSourceSha: "c".repeat(40),
       headSha: sha,
+      runId: RUN_ID,
     }),
     /build source/,
   );
@@ -488,12 +557,13 @@ test("candidate check ties the digest to its build source and does not deploy", 
       originMainSha: sha,
       buildSourceSha: sha,
       headSha: sha,
+      runId: RUN_ID,
     }),
     /fail-closed/,
   );
   assert.throws(
-    () => bindCandidate({ mainSha: sha, digest, originMainSha: sha, buildSourceSha: sha }),
-    /build source/,
+    () => bindCandidate({ mainSha: sha, digest, originMainSha: sha, buildSourceSha: sha, headSha: sha }),
+    /run id/,
   );
   const result = selfTest();
   assert.equal(result.deployed, false);

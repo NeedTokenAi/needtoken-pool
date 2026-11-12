@@ -2,7 +2,7 @@
   // Phase-1 local mock. Not run on a real account. Not a six-hour run.
   // durable_object is public beta. Instance caps are not set here.
   // The deprecated scheduling policy is intentionally absent.
-  // SUB2API_WRITER_PERMIT=isolated does not stop the existing production process.
+  // An injected writer permit does not stop the existing production process.
   "name": "needtoken-pool",
   "main": "src/index.js",
   "compatibility_date": "2026-11-12",
@@ -42,7 +42,6 @@
   "vars": {
     "SUB2API_RUNTIME": "cloudflare",
     "SKIP_SETUP": "true",
-    "SUB2API_ISOLATION": "isolated",
-    "SUB2API_WRITER_PERMIT": "isolated"
+    "SUB2API_ISOLATION": "isolated"
   }
 }

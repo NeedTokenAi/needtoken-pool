@@ -39,25 +39,85 @@ export const SECRET_BINDING_NAMES = [
   "REDIS_ENABLE_TLS",
 ];
 
-const PLACEHOLDER_DIGEST = `sha256:${"0".repeat(64)}`;
+export const REGISTRY_IMAGE_REF = /^registry\.cloudflare\.com\/[a-z0-9][a-z0-9-]{0,62}\/[a-z0-9][a-z0-9._/-]{0,126}@sha256:[0-9a-f]{64}$/;
 
-export function mandatoryContainerEnv() {
-  return {
-    SUB2API_RUNTIME: "cloudflare",
-    SKIP_SETUP: "true",
-    SUB2API_ISOLATION: "isolated",
-    SUB2API_WRITER_PERMIT: "isolated",
-  };
+const TEST_PERMITS = new Set([
+  "isolated",
+  "test",
+  "approved",
+  "true",
+  "yes",
+  "1",
+  "production",
+  "staging",
+]);
+
+export function parseAllowlist(raw) {
+  if (typeof raw !== "string") {
+    throw new Error("isolated allowlist must be injected host names");
+  }
+  const text = raw.trim();
+  if (text === "" || text.startsWith("{") || text.startsWith("[")) {
+    throw new Error("hand-filled JSON is not an isolated allowlist");
+  }
+  const hosts = text.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
+  if (hosts.length === 0) {
+    throw new Error("isolated allowlist is empty");
+  }
+  for (const host of hosts) {
+    if (host.includes("/") || host.includes(" ") || host.includes("@") || host.includes(":")) {
+      throw new Error("isolated allowlist entries must be host names");
+    }
+  }
+  return hosts;
+}
+
+export function assertExactHost(name, host, allow) {
+  const value = typeof host === "string" ? host.trim().toLowerCase() : "";
+  if (!value || !allow.includes(value)) {
+    throw new Error(`${name} is not on the isolated allowlist`);
+  }
+}
+
+export function assertIsolatedHosts(env = {}) {
+  assertExactHost(
+    "DATABASE_HOST",
+    env.DATABASE_HOST,
+    parseAllowlist(env.POOL_ISOLATED_DATABASE_HOSTS),
+  );
+  assertExactHost(
+    "REDIS_HOST",
+    env.REDIS_HOST,
+    parseAllowlist(env.POOL_ISOLATED_REDIS_HOSTS),
+  );
+}
+
+function nonTestPermit(permit) {
+  if (typeof permit !== "string") {
+    return false;
+  }
+  const value = permit.trim();
+  return value.length >= 16 && !TEST_PERMITS.has(value.toLowerCase());
 }
 
 export function containerEnv(bindings = {}) {
-  if (bindings.SUB2API_ISOLATION && bindings.SUB2API_ISOLATION !== "isolated") {
+  if (bindings.SUB2API_ISOLATION !== "isolated") {
     throw new Error("candidate allows isolated bindings only");
   }
-  if (bindings.SUB2API_WRITER_PERMIT && bindings.SUB2API_WRITER_PERMIT !== "isolated") {
-    throw new Error("candidate allows isolated bindings only");
+  if (!nonTestPermit(bindings.SUB2API_WRITER_PERMIT)) {
+    throw new Error("writer permit must be a non-test value");
   }
-  const env = mandatoryContainerEnv();
+  assertIsolatedHosts(bindings);
+  const env = {
+    SUB2API_RUNTIME: "cloudflare",
+    SKIP_SETUP: "true",
+    SUB2API_ISOLATION: "isolated",
+    SUB2API_WRITER_PERMIT: bindings.SUB2API_WRITER_PERMIT.trim(),
+    POOL_ISOLATED_DATABASE_HOSTS: bindings.POOL_ISOLATED_DATABASE_HOSTS,
+    POOL_ISOLATED_REDIS_HOSTS: bindings.POOL_ISOLATED_REDIS_HOSTS,
+    DATABASE_HOST: bindings.DATABASE_HOST,
+    REDIS_HOST: bindings.REDIS_HOST,
+  };
   for (const name of SECRET_BINDING_NAMES) {
     if (!Object.prototype.hasOwnProperty.call(bindings, name)) {
       continue;
@@ -68,18 +128,20 @@ export function containerEnv(bindings = {}) {
     }
     env[name] = value;
   }
-  if (Object.prototype.hasOwnProperty.call(env, "AUTO_SETUP")) {
+  if (Object.prototype.hasOwnProperty.call(bindings, "AUTO_SETUP") || Object.prototype.hasOwnProperty.call(env, "AUTO_SETUP")) {
     throw new Error("AUTO_SETUP must stay off");
   }
   return env;
 }
 
 export function isolatedPermit(env = {}) {
-  const isolation = env.SUB2API_ISOLATION ?? "isolated";
-  const permit = env.SUB2API_WRITER_PERMIT ?? "isolated";
-  if (isolation !== "isolated" || permit !== "isolated") {
+  if (env.SUB2API_ISOLATION !== "isolated") {
     throw new Error("candidate allows isolated bindings only");
   }
+  if (!nonTestPermit(env.SUB2API_WRITER_PERMIT)) {
+    throw new Error("writer permit must be a non-test value");
+  }
+  assertIsolatedHosts(env);
   return {
     isolated: true,
     held: true,
@@ -89,12 +151,83 @@ export function isolatedPermit(env = {}) {
   };
 }
 
+export function buildRecordFromEnv(env = {}) {
+  if (typeof env.POOL_BUILD_RECORD === "string" || typeof env.POOL_BUILD_JSON === "string") {
+    throw new Error("hand-filled JSON is not a build record");
+  }
+  const fields = {
+    repo: env.POOL_BUILD_REPOSITORY,
+    sha: env.POOL_BUILD_SHA,
+    runId: env.POOL_BUILD_RUN_ID,
+    digest: env.POOL_BUILD_DIGEST,
+  };
+  for (const value of Object.values(fields)) {
+    if (typeof value !== "string" || value.trim() === "" || value.trim().startsWith("{") || value.trim().startsWith("[")) {
+      throw new Error("hand-filled JSON is not a build record");
+    }
+  }
+  return {
+    source: "github-actions-build",
+    assembledBy: "buildRecordFromEnv",
+    repo: fields.repo.trim(),
+    sha: fields.sha.trim(),
+    runId: fields.runId.trim(),
+    digest: fields.digest.trim(),
+  };
+}
+
+export function approvePoolImage(image, record) {
+  if (typeof record === "string" || record == null || typeof record !== "object" || Array.isArray(record)) {
+    throw new Error("hand-filled JSON is not a build record");
+  }
+  if (record.source !== "github-actions-build" || record.assembledBy !== "buildRecordFromEnv") {
+    throw new Error("hand-filled JSON is not a build record");
+  }
+  const bare = /^sha256:[0-9a-f]{64}$/;
+  if (bare.test(String(image ?? "")) || bare.test(String(record.digest ?? ""))) {
+    throw new Error("bare sha256 is not the container image");
+  }
+  if (!REGISTRY_IMAGE_REF.test(String(image ?? "")) || !REGISTRY_IMAGE_REF.test(String(record.digest ?? ""))) {
+    throw new Error("pool image must be a registry.cloudflare.com digest ref");
+  }
+  if (record.digest !== image) {
+    throw new Error("build record digest does not equal ctx.container.images.pool");
+  }
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(record.repo ?? "")) {
+    throw new Error("build record repository is required");
+  }
+  if (!/^[0-9a-f]{40}$/.test(record.sha ?? "")) {
+    throw new Error("build record SHA is required");
+  }
+  if (!/^[1-9][0-9]+$/.test(record.runId ?? "")) {
+    throw new Error("build record run id is required");
+  }
+  return [{
+    role: "current",
+    digest: record.digest,
+    sha: record.sha,
+    repo: record.repo,
+    runId: record.runId,
+  }];
+}
+
+export function sessionFromContainer(ctx, env) {
+  const image = ctx?.container?.images?.pool;
+  return {
+    image,
+    approved: approvePoolImage(image, buildRecordFromEnv(env)),
+    permit: isolatedPermit(env),
+  };
+}
+
 function approvedSlot(image, approved) {
   return (approved ?? []).find((slot) => {
     return slot?.digest === image
-      && slot.digest !== PLACEHOLDER_DIGEST
-      && /^sha256:[0-9a-f]{64}$/.test(slot.digest ?? "")
-      && /^[0-9a-f]{40}$/.test(slot.sha ?? "");
+      && REGISTRY_IMAGE_REF.test(slot.digest ?? "")
+      && REGISTRY_IMAGE_REF.test(image ?? "")
+      && /^[0-9a-f]{40}$/.test(slot.sha ?? "")
+      && /^[1-9][0-9]+$/.test(String(slot.runId ?? ""))
+      && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(slot.repo ?? "");
   });
 }
 

@@ -2,6 +2,7 @@ package setup
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 
@@ -17,10 +18,40 @@ func RequireIsolatedWriterPermit() error {
 	if strings.TrimSpace(os.Getenv("SUB2API_ISOLATION")) != "isolated" {
 		return errors.New("cloudflare candidate requires SUB2API_ISOLATION=isolated")
 	}
-	if strings.TrimSpace(os.Getenv("SUB2API_WRITER_PERMIT")) != "isolated" {
-		return errors.New("cloudflare candidate requires SUB2API_WRITER_PERMIT=isolated")
+	if !nonTestWriterPermit(os.Getenv("SUB2API_WRITER_PERMIT")) {
+		return errors.New("cloudflare candidate requires a non-test writer permit")
 	}
-	return nil
+	if err := requireExactHost("DATABASE_HOST", "POOL_ISOLATED_DATABASE_HOSTS"); err != nil {
+		return err
+	}
+	return requireExactHost("REDIS_HOST", "POOL_ISOLATED_REDIS_HOSTS")
+}
+
+func nonTestWriterPermit(permit string) bool {
+	permit = strings.TrimSpace(permit)
+	if len(permit) < 16 {
+		return false
+	}
+	switch strings.ToLower(permit) {
+	case "isolated", "test", "approved", "true", "yes", "1", "production", "staging":
+		return false
+	default:
+		return true
+	}
+}
+
+func requireExactHost(hostEnv, allowEnv string) error {
+	host := strings.ToLower(strings.TrimSpace(os.Getenv(hostEnv)))
+	raw := strings.TrimSpace(os.Getenv(allowEnv))
+	if host == "" || raw == "" || strings.HasPrefix(raw, "{") || strings.HasPrefix(raw, "[") {
+		return fmt.Errorf("%s is not on the isolated allowlist", hostEnv)
+	}
+	for item := range strings.SplitSeq(raw, ",") {
+		if strings.ToLower(strings.TrimSpace(item)) == host {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s is not on the isolated allowlist", hostEnv)
 }
 
 // WriterLease is held by this process only. Losing it refuses new HTTP work,
