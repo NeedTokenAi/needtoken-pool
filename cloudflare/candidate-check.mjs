@@ -27,7 +27,7 @@ export function stripJsonc(text) {
     .replace(/,(\s*[}\]])/g, "$1");
 }
 
-export function assertDurableObjectPolicy(wranglerText) {
+export function assertDurableObjectPolicy(wranglerText, options = {}) {
   const config = JSON.parse(stripJsonc(wranglerText));
   const containers = config.containers ?? [];
   if (containers.length !== 1) {
@@ -46,11 +46,33 @@ export function assertDurableObjectPolicy(wranglerText) {
   if (application.scheduling_policy === "default" || !application.scheduling_policy) {
     throw new Error("default scheduling policy is deprecated");
   }
-  const image = application.images?.pool;
-  if (!image?.dockerfile || !image?.build_context) {
+  const image = application.images?.pool ?? {};
+  if (options.digestPinned) {
+    assertStagingImageConfig(config, options.record);
+  } else if (!image.dockerfile || !image.build_context) {
     throw new Error("pool image must name the existing Dockerfile");
   }
   return config;
+}
+
+export function assertStagingImageConfig(config, record) {
+  const application = config.containers?.[0] ?? {};
+  const image = application.images?.pool ?? {};
+  if (image.dockerfile || image.build_context || application.image) {
+    throw new Error("staging config must not rebuild the image at deploy time");
+  }
+  if (!record || record.recorded !== true) {
+    if (image.image) {
+      throw new Error("staging image must be the digest recorded by CI");
+    }
+    return;
+  }
+  if (typeof record.repository !== "string" || typeof record.sha !== "string" || typeof record.run_id !== "string") {
+    throw new Error("CI image record must include repository, sha, and run id");
+  }
+  if (image.image !== record.digest || !REGISTRY_IMAGE_REF.test(record.digest ?? "") || record.digest.endsWith("0".repeat(64))) {
+    throw new Error("staging image must be the digest recorded by CI");
+  }
 }
 
 export function assertNoPublisher(texts) {
@@ -177,17 +199,18 @@ export function selfTest() {
     throw new Error("worker must route one code-enforced singleton");
   }
   const staging = read("cloudflare/wrangler.staging.jsonc");
-  const stagingConfig = assertDurableObjectPolicy(staging);
+  const record = JSON.parse(read("cloudflare/staging-image-record.json"));
+  const stagingConfig = assertDurableObjectPolicy(staging, { digestPinned: true, record });
   if (stagingConfig.name !== "needtoken-pool-staging") {
     throw new Error("staging worker name must use the -staging suffix");
   }
   if (stagingConfig.routes || stagingConfig.route || stagingConfig.workers_dev !== false) {
     throw new Error("staging config must not publish a production route");
   }
-  const imageWorkflow = read(".github/workflows/cloudflare-staging-image.yml");
-  assertStagingImageWorkflow(imageWorkflow);
+  if (!staging.includes("CONFIG_FILE") || !staging.includes("DATA_DIR") || !staging.includes("STAGING_TEST_JWT_SECRET")) {
+    throw new Error("staging config must pass CONFIG_FILE, DATA_DIR, and the test JWT");
+  }
   assertNoPublisher([
-    ["cloudflare-staging-image.yml", imageWorkflow],
     ["wrangler.staging.jsonc", staging],
   ]);
   if (workflow.toLowerCase().includes("rollback is possible")) {

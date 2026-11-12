@@ -108,6 +108,13 @@ export function containerEnv(bindings = {}) {
   if (bindings.REDIS_KEY_PREFIX === "staging:") {
     env.REDIS_KEY_PREFIX = "staging:";
   }
+  for (const name of ["CONFIG_FILE", "DATA_DIR", "STAGING_TEST_JWT_SECRET", "STAGING_TEST_TOTP_ENCRYPTION_KEY"]) {
+    const value = bindings[name];
+    if (typeof value !== "string" || value.length === 0) {
+      continue;
+    }
+    env[name] = value;
+  }
   for (const name of SECRET_BINDING_NAMES) {
     if (!Object.prototype.hasOwnProperty.call(bindings, name)) {
       continue;

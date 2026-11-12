@@ -174,6 +174,7 @@ func (c *stubConcurrencyCacheForTest) CleanupStaleProcessSlots(_ context.Context
 type trackingConcurrencyCache struct {
 	stubConcurrencyCacheForTest
 	cleanupPrefix string
+	slotCleanups  atomic.Int32
 }
 
 func (c *trackingConcurrencyCache) CleanupStaleProcessSlots(_ context.Context, prefix string) error {
@@ -191,6 +192,24 @@ func TestCleanupStaleProcessSlots_DelegatesPrefix(t *testing.T) {
 	svc := NewConcurrencyService(cache)
 	require.NoError(t, svc.CleanupStaleProcessSlots(context.Background()))
 	require.Equal(t, RequestIDPrefix(), cache.cleanupPrefix)
+}
+
+func (c *trackingConcurrencyCache) CleanupExpiredAccountSlotKeys(context.Context) error {
+	c.slotCleanups.Add(1)
+	return nil
+}
+
+func TestStartupRedisDeletesSkippedWhenConsumersOff(t *testing.T) {
+	t.Setenv("SUB2API_BACKGROUND_CONSUMERS", "off")
+	cache := &trackingConcurrencyCache{}
+	svc := NewConcurrencyService(cache)
+
+	require.NoError(t, svc.CleanupStaleProcessSlots(context.Background()))
+	svc.StartSlotCleanupWorker(nil, time.Millisecond)
+	time.Sleep(40 * time.Millisecond)
+
+	require.Empty(t, cache.cleanupPrefix)
+	require.Zero(t, cache.slotCleanups.Load())
 }
 
 func TestAcquireAccountSlot_Success(t *testing.T) {

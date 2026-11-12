@@ -40,6 +40,17 @@ func (c *cleanupWorkerUserMsgQueueCache) ReconcileExpiredLockCandidates(_ contex
 	return 1, nil
 }
 
+func TestStartCleanupWorker_SkippedWhenConsumersOff(t *testing.T) {
+	t.Setenv("SUB2API_BACKGROUND_CONSUMERS", "off")
+	cache := &cleanupWorkerUserMsgQueueCache{}
+	svc := NewUserMessageQueueService(cache, nil, nil)
+
+	svc.StartCleanupWorker(time.Millisecond)
+	time.Sleep(40 * time.Millisecond)
+
+	require.Zero(t, cache.reconcileCalls.Load())
+}
+
 func TestStartCleanupWorker_ReconcilesExpiredLockCandidates(t *testing.T) {
 	cache := &cleanupWorkerUserMsgQueueCache{}
 	svc := NewUserMessageQueueService(cache, nil, nil)

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { bindCandidate, selfTest } from "../candidate-check.mjs";
+import { assertStagingImageConfig, bindCandidate, selfTest } from "../candidate-check.mjs";
 import {
   INACTIVITY_TIMEOUT_MS,
   INSTANCE,
@@ -38,6 +38,10 @@ function isolatedEnv(overrides = {}) {
     REDIS_HOST: "existing-upstash.example",
     SUB2API_BACKGROUND_CONSUMERS: "off",
     REDIS_KEY_PREFIX: "staging:",
+    CONFIG_FILE: "/app/data/config.yaml",
+    DATA_DIR: "/app/data",
+    STAGING_TEST_JWT_SECRET: "staging-test-jwt-secret-not-production",
+    STAGING_TEST_TOTP_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     POOL_BUILD_REPOSITORY: REPO,
     POOL_BUILD_SHA: SHA,
     POOL_BUILD_RUN_ID: RUN_ID,
@@ -534,9 +538,13 @@ test("formal openSession approval rejects a bare digest, hand-filled JSON, and a
     }),
   );
   assert.equal(shared.permit.redisKeyPrefixApplied, false);
-  assert.equal(containerEnv(isolatedEnv()).SUB2API_BACKGROUND_CONSUMERS, "off");
-  assert.equal(containerEnv(isolatedEnv()).REDIS_KEY_PREFIX, "staging:");
-  assert.equal(containerEnv(isolatedEnv()).POOL_ISOLATED_REDIS_HOSTS, undefined);
+  const passed = containerEnv(isolatedEnv());
+  assert.equal(passed.SUB2API_BACKGROUND_CONSUMERS, "off");
+  assert.equal(passed.REDIS_KEY_PREFIX, "staging:");
+  assert.equal(passed.POOL_ISOLATED_REDIS_HOSTS, undefined);
+  assert.equal(passed.CONFIG_FILE, "/app/data/config.yaml");
+  assert.equal(passed.DATA_DIR, "/app/data");
+  assert.equal(passed.STAGING_TEST_JWT_SECRET, "staging-test-jwt-secret-not-production");
   assert.throws(
     () => sessionFromContainer(
       { container: { images: { pool: IMAGE } } },
@@ -592,4 +600,15 @@ test("candidate check ties the digest to its build source and does not deploy", 
   assert.equal(result.deployed, false);
   assert.equal(result.rollback, false);
   assert.equal(result.pgDump, "unverified");
+
+  const recorded = { recorded: true, repository: REPO, sha, run_id: RUN_ID, digest };
+  assert.doesNotThrow(() => assertStagingImageConfig({
+    containers: [{ images: { pool: { image: digest } } }],
+  }, recorded));
+  assert.throws(() => assertStagingImageConfig({
+    containers: [{ images: { pool: { dockerfile: "../Dockerfile", build_context: ".." } } }],
+  }, recorded), /rebuild/);
+  assert.throws(() => assertStagingImageConfig({
+    containers: [{ images: { pool: { image: digest } } }],
+  }, { recorded: false, digest: "" }), /digest recorded by CI/);
 });

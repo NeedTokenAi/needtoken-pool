@@ -46,6 +46,20 @@ func (c *schedulerFullRebuildTestCache) ReopenBucket(_ context.Context, bucket S
 	return SchedulerBucketWriteToken{Bucket: bucket, Epoch: 1}, nil
 }
 
+func TestSchedulerSnapshotStartSkipsRedisRebuildWhenConsumersOff(t *testing.T) {
+	t.Setenv("SUB2API_BACKGROUND_CONSUMERS", "off")
+	cache := &schedulerFullRebuildTestCache{listErr: errors.New("should not list buckets")}
+	svc := &SchedulerSnapshotService{cache: cache, stopCh: make(chan struct{})}
+
+	svc.Start()
+	time.Sleep(40 * time.Millisecond)
+	svc.Stop()
+
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	require.Zero(t, cache.listCalls)
+}
+
 func TestSchedulerSnapshotServiceFullRebuildCoalescesConcurrentRequestsIntoTrailingRun(t *testing.T) {
 	svc := &SchedulerSnapshotService{}
 	wantTrailingErr := errors.New("trailing rebuild failed")

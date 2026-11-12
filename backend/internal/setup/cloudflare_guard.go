@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -27,6 +28,9 @@ type cloudflareConfigFile struct {
 func PrepareProcessStart() error {
 	if !config.CloudflareProfileEnabled() {
 		return nil
+	}
+	if err := MaterializeStagingTestConfig(); err != nil {
+		return err
 	}
 	if err := GuardCloudflareStartup(); err != nil {
 		return err
@@ -99,6 +103,90 @@ func GuardCloudflareStartup() error {
 		return err
 	}
 	return nil
+}
+
+// MaterializeStagingTestConfig writes config.yaml and .installed from the
+// test-only STAGING_TEST_JWT_SECRET and STAGING_TEST_TOTP_ENCRYPTION_KEY
+// variables. It does not read JWT_SECRET or TOTP_ENCRYPTION_KEY, and it does
+// not generate a key when those test variables are absent.
+func MaterializeStagingTestConfig() error {
+	if !config.CloudflareProfileEnabled() {
+		return nil
+	}
+	_, jwtSet := os.LookupEnv("STAGING_TEST_JWT_SECRET")
+	_, totpSet := os.LookupEnv("STAGING_TEST_TOTP_ENCRYPTION_KEY")
+	if !jwtSet && !totpSet {
+		return nil
+	}
+	jwtSecret := strings.TrimSpace(os.Getenv("STAGING_TEST_JWT_SECRET"))
+	totpKey := strings.TrimSpace(os.Getenv("STAGING_TEST_TOTP_ENCRYPTION_KEY"))
+	if jwtSecret == "" || totpKey == "" {
+		return errors.New("staging test config requires both STAGING_TEST_JWT_SECRET and STAGING_TEST_TOTP_ENCRYPTION_KEY")
+	}
+	if len(jwtSecret) < 32 {
+		return errors.New("staging test JWT must be at least 32 characters")
+	}
+	if !stagingTestTOTPKeyOK(totpKey) {
+		return errors.New("staging test TOTP key must be 64 hex characters")
+	}
+	if strings.TrimSpace(os.Getenv("JWT_SECRET")) != "" || strings.TrimSpace(os.Getenv("TOTP_ENCRYPTION_KEY")) != "" {
+		return errors.New("staging test config refuses JWT_SECRET and TOTP_ENCRYPTION_KEY")
+	}
+	if strings.TrimSpace(os.Getenv("CONFIG_FILE")) == "" || strings.TrimSpace(os.Getenv("DATA_DIR")) == "" {
+		return errors.New("staging test config requires CONFIG_FILE and DATA_DIR")
+	}
+	if AutoSetupEnabled() {
+		return errors.New("staging test config requires AUTO_SETUP off")
+	}
+	configPath, err := config.ResolveCloudflareConfigPath()
+	if err != nil {
+		return err
+	}
+	var parsed cloudflareConfigFile
+	parsed.JWT.Secret = jwtSecret
+	parsed.Totp.EncryptionKey = totpKey
+	body, err := yaml.Marshal(parsed)
+	if err != nil {
+		return err
+	}
+	if existing, readErr := os.ReadFile(configPath); readErr == nil {
+		if !bytes.Equal(bytes.TrimSpace(existing), bytes.TrimSpace(body)) {
+			return errors.New("staging test config refuses to replace a different config.yaml")
+		}
+	} else if !os.IsNotExist(readErr) {
+		return readErr
+	} else {
+		if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(configPath, body, 0o600); err != nil {
+			return err
+		}
+	}
+	lockPath := config.InstalledLockFor(configPath)
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		if !os.IsNotExist(statErr) {
+			return statErr
+		}
+		if err := os.WriteFile(lockPath, []byte("installed\n"), 0o400); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func stagingTestTOTPKeyOK(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func sameSecretOrUnset(envName, fileValue string) error {

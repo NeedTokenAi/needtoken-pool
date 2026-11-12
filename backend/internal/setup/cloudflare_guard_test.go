@@ -50,6 +50,8 @@ func useCloudflareDataDir(t *testing.T, dir string) {
 	t.Setenv("REDIS_HOST", "existing-upstash.example")
 	t.Setenv("SUB2API_BACKGROUND_CONSUMERS", "off")
 	t.Setenv("REDIS_KEY_PREFIX", "staging:")
+	unsetGuardEnv(t, "STAGING_TEST_JWT_SECRET")
+	unsetGuardEnv(t, "STAGING_TEST_TOTP_ENCRYPTION_KEY")
 }
 
 func writeInjectedConfig(t *testing.T, dir string) []byte {
@@ -66,6 +68,34 @@ func writeInjectedConfig(t *testing.T, dir string) []byte {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ConfigFileName), body, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, InstallLockFile), []byte("installed_at=2020-01-01T00:00:00Z\n"), 0o400))
 	return body
+}
+
+func TestCloudflareStagingTestConfigStartsWithoutProductionSecrets(t *testing.T) {
+	dir := t.TempDir()
+	useCloudflareDataDir(t, dir)
+	configPath := filepath.Join(dir, ConfigFileName)
+	t.Setenv("CONFIG_FILE", configPath)
+	t.Setenv("STAGING_TEST_JWT_SECRET", "staging-test-jwt-secret-not-production")
+	t.Setenv("STAGING_TEST_TOTP_ENCRYPTION_KEY", cloudflareFixtureTOTPKey)
+
+	require.NoError(t, PrepareProcessStart())
+
+	body, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	require.Contains(t, string(body), "staging-test-jwt-secret-not-production")
+	require.Contains(t, string(body), cloudflareFixtureTOTPKey)
+	require.NotContains(t, string(body), "JWT_SECRET")
+	lock, err := os.ReadFile(filepath.Join(dir, InstallLockFile))
+	require.NoError(t, err)
+	require.Equal(t, "installed\n", string(lock))
+
+	t.Setenv("JWT_SECRET", "production-jwt-secret-value-32ch")
+	err = PrepareProcessStart()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "JWT_SECRET")
+	got, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	require.Equal(t, body, got)
 }
 
 func TestCloudflareEmptyDiskRefusesAndCreatesNoKey(t *testing.T) {

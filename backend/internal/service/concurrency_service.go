@@ -210,7 +210,10 @@ func generateRequestID() string {
 }
 
 func (s *ConcurrencyService) CleanupStaleProcessSlots(ctx context.Context) error {
-	if s == nil || s.cache == nil {
+	// Shared Upstash still holds production slots and wait counts. This startup
+	// sweep deletes other process prefixes and legacy wait keys, so it must not
+	// run while background consumers are off.
+	if BackgroundConsumersSuppressed() || s == nil || s.cache == nil {
 		return nil
 	}
 	return s.cache.CleanupStaleProcessSlots(ctx, RequestIDPrefix())

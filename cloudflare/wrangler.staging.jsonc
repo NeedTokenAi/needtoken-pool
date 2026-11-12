@@ -5,6 +5,8 @@
   // SUB2API_BACKGROUND_CONSUMERS=off keeps workers off the shared Upstash queues.
   // DATABASE_HOST is allowlisted in the process. Staging cannot use the production database.
   // The production DSN is not set here.
+  // images.pool stays empty until CI records a registry digest. A Dockerfile here
+  // would rebuild the image at deploy time. JWT and TOTP below are test fixtures.
   "name": "needtoken-pool-staging",
   "main": "src/index.js",
   "compatibility_date": "2026-11-12",
@@ -14,10 +16,7 @@
       "class_name": "PoolContainer",
       "scheduling_policy": "durable_object",
       "images": {
-        "pool": {
-          "dockerfile": "../Dockerfile",
-          "build_context": ".."
-        }
+        "pool": {}
       }
     }
   ],
@@ -45,6 +44,10 @@
     "SUB2API_RUNTIME": "cloudflare",
     "SKIP_SETUP": "true",
     "SUB2API_ISOLATION": "isolated",
-    "SUB2API_BACKGROUND_CONSUMERS": "off"
+    "SUB2API_BACKGROUND_CONSUMERS": "off",
+    "DATA_DIR": "/app/data",
+    "CONFIG_FILE": "/app/data/config.yaml",
+    "STAGING_TEST_JWT_SECRET": "staging-test-jwt-secret-not-production",
+    "STAGING_TEST_TOTP_ENCRYPTION_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   }
 }
