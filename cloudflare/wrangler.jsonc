@@ -27,6 +27,11 @@
       "image_build_context": "..",
       "max_instances": 2,
       "scheduling_policy": "default",
+      // max_instances 2 would otherwise roll out as [10, 100]. One 100 step
+      // replaces this instance once. Wrangler 4 starts the new copy only after
+      // the old process exits, so grace 0 does not run two copies.
+      "rollout_step_percentage": 100,
+      "rollout_active_grace_period": 0,
       // Default-policy custom sizes need at least 1 vCPU and 3 GiB per vCPU.
       // basic is the smallest named type at or above 512 MiB: 1/4 vCPU, 1 GiB.
       "instance_type": "basic",

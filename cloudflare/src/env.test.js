@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { containerEnv } from "./env.js";
+import { notReadyResponse, waitForReady } from "./ready.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -56,6 +57,8 @@ test("production wrangler config has no public route", () => {
   assert.equal(container.max_instances, 2);
   assert.equal(container.instance_type, "basic");
   assert.equal(container.scheduling_policy, "default");
+  assert.equal(container.rollout_step_percentage, 100);
+  assert.equal(container.rollout_active_grace_period, 0);
   assert.equal(container.image, "../Dockerfile");
   assert.equal(container.image_build_context, "..");
   assert.deepEqual(container.constraints.regions, ["APAC"]);
@@ -74,6 +77,37 @@ test("production wrangler config has no public route", () => {
   assert.equal(worker.includes("Math.random"), false);
   assert.equal(worker.includes("/health"), true);
   assert.equal(worker.includes("6 * 60 * 60 * 1000"), true);
+  assert.equal(worker.includes("waitForReady("), true);
+  assert.equal(worker.includes("notReadyResponse("), true);
+  assert.equal(worker.includes("did not become ready"), false);
+});
+
+test("a closed port retries and then returns 503", async () => {
+  let probes = 0;
+  const ready = await waitForReady(
+    async () => {
+      probes += 1;
+      if (probes < 3) throw new Error("connect");
+      return "up";
+    },
+    async () => {},
+    10_000,
+    1,
+  );
+  assert.equal(ready, "up");
+  assert.equal(probes, 3);
+
+  const missed = await waitForReady(
+    async () => false,
+    async () => {},
+    0,
+    1_000,
+  );
+  assert.equal(missed, null);
+
+  const response = notReadyResponse();
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("retry-after"), "15");
 });
 
 test("deploy workflows do not build or ship a separate image", () => {
