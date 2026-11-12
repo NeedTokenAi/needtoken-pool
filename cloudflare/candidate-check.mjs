@@ -63,6 +63,14 @@ export function assertNoPublisher(texts) {
   }
 }
 
+export const PINNED_ACTIONS = {
+  checkout: "d23441a48e516b6c34aea4fa41551a30e30af803",
+  setupNode: "249970729cb0ef3589644e2896645e5dc5ba9c38",
+  setupGo: "924ae3a1cded613372ab5595356fb5720e22ba16",
+};
+
+const PLACEHOLDER_DIGEST = `sha256:${"0".repeat(64)}`;
+
 export function assertCandidateWorkflow(workflowText) {
   if (/^\s*push\s*:/m.test(workflowText) || /^\s*tags\s*:/m.test(workflowText)) {
     throw new Error("candidate workflow must not run on push or v* tags");
@@ -73,14 +81,34 @@ export function assertCandidateWorkflow(workflowText) {
   if (!workflowText.includes("contents: read")) {
     throw new Error("candidate workflow must stay read-only");
   }
+  if (/uses:\s*actions\/[^\s@]+@v\d/.test(workflowText)) {
+    throw new Error("actions must be pinned to commit SHAs");
+  }
+  for (const sha of Object.values(PINNED_ACTIONS)) {
+    if (!workflowText.includes(sha)) {
+      throw new Error(`candidate workflow is missing pinned action ${sha}`);
+    }
+  }
+  if (!workflowText.includes("build_source_sha") || !workflowText.includes("--head")) {
+    throw new Error("digest must be tied to the build source SHA");
+  }
 }
 
-export function bindCandidate({ mainSha, digest, originMainSha }) {
+export function bindCandidate({ mainSha, digest, originMainSha, buildSourceSha, headSha }) {
   if (!/^[0-9a-f]{40}$/.test(mainSha ?? "")) {
     throw new Error("main SHA must be 40 hex characters");
   }
   if (!/^sha256:[0-9a-f]{64}$/.test(digest ?? "")) {
     throw new Error("image digest must be sha256 and 64 hex characters");
+  }
+  if (digest === PLACEHOLDER_DIGEST) {
+    throw new Error("placeholder digest stays fail-closed");
+  }
+  if (!/^[0-9a-f]{40}$/.test(buildSourceSha ?? "")) {
+    throw new Error("digest build source SHA is required");
+  }
+  if (buildSourceSha !== mainSha || headSha !== mainSha) {
+    throw new Error("digest build source is not the checked out candidate SHA");
   }
   if (mainSha !== originMainSha) {
     throw new Error("candidate SHA is not origin/main");
@@ -88,7 +116,9 @@ export function bindCandidate({ mainSha, digest, originMainSha }) {
   return {
     mainSha,
     digest,
+    buildSourceSha,
     deployed: false,
+    rollback: false,
     pgDump: PG_DUMP_STATUS,
   };
 }
@@ -114,15 +144,21 @@ export function selfTest() {
   if (wrangler.includes("max_instances")) {
     throw new Error("max_instances is not valid for this policy");
   }
+  if (bindings.scope !== "isolated" || bindings.stops_old_production !== false) {
+    throw new Error("candidate allows isolated bindings only");
+  }
   for (const binding of bindings.bindings) {
     if (!binding.name || !binding.container_env || binding.value) {
       throw new Error("secret bindings are names only");
     }
   }
-  if (!index.includes("singletonName") || !index.includes("idFromName")) {
+  if (!index.includes("singletonName") || !index.includes("getByName")) {
     throw new Error("worker must route one code-enforced singleton");
   }
-  return { pgDump: PG_DUMP_STATUS, deployed: false };
+  if (workflow.toLowerCase().includes("rollback is possible")) {
+    throw new Error("rollback is not available");
+  }
+  return { pgDump: PG_DUMP_STATUS, deployed: false, rollback: false };
 }
 
 function argument(name) {
@@ -143,8 +179,10 @@ if (isMain) {
       mainSha: argument("--main-sha"),
       digest: argument("--digest"),
       originMainSha: argument("--origin-main"),
+      buildSourceSha: argument("--build-source-sha"),
+      headSha: argument("--head"),
     });
-    console.log(`bound ${bound.mainSha} ${bound.digest} deployed=${bound.deployed} pg_dump=${bound.pgDump}`);
+    console.log(`bound ${bound.mainSha} ${bound.digest} deployed=${bound.deployed} rollback=${bound.rollback} pg_dump=${bound.pgDump}`);
   } else {
     throw new Error("use --self-test or --bind");
   }

@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +44,8 @@ func useCloudflareDataDir(t *testing.T, dir string) {
 	unsetGuardEnv(t, "AUTO_SETUP")
 	t.Setenv("SUB2API_RUNTIME", "cloudflare")
 	t.Setenv("SKIP_SETUP", "true")
+	t.Setenv("SUB2API_ISOLATION", "isolated")
+	t.Setenv("SUB2API_WRITER_PERMIT", "isolated")
 }
 
 func writeInjectedConfig(t *testing.T, dir string) []byte {
@@ -102,6 +105,10 @@ func TestCloudflareInjectedConfigStillDecrypts(t *testing.T) {
 
 	cfg, err := config.Load()
 	require.NoError(t, err)
+	expected, err := config.ResolveCloudflareConfigPath()
+	require.NoError(t, err)
+	require.NoError(t, config.ConfirmConfigFileUsed(expected))
+	require.Equal(t, filepath.Join(dir, ConfigFileName), expected)
 	require.Equal(t, cloudflareJWTFixture(), cfg.JWT.Secret)
 	require.Equal(t, cloudflareFixtureTOTPKey, cfg.Totp.EncryptionKey)
 	require.True(t, cfg.Totp.EncryptionKeyConfigured)
@@ -208,4 +215,111 @@ func TestCloudflareProfileUnsetDoesNotTouchDisk(t *testing.T) {
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	require.Empty(t, entries)
+}
+
+func TestCloudflareConfigPathsMustBeTheLoadedFile(t *testing.T) {
+	dataDir := t.TempDir()
+	otherDir := t.TempDir()
+	original := writeInjectedConfig(t, dataDir)
+	otherKey := strings.Repeat("ab", 31) + "cd"
+	otherBody, err := yaml.Marshal(cloudflareConfigFile{
+		JWT: struct {
+			Secret string `yaml:"secret"`
+		}{Secret: cloudflareJWTFixture()},
+		Totp: struct {
+			EncryptionKey string `yaml:"encryption_key"`
+		}{EncryptionKey: otherKey},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(otherDir, ConfigFileName), otherBody, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(otherDir, InstallLockFile), []byte("installed\n"), 0o400))
+
+	useCloudflareDataDir(t, dataDir)
+	t.Setenv("CONFIG_FILE", filepath.Join(otherDir, ConfigFileName))
+
+	called := false
+	err = BeginProcessWork(func() error {
+		called = true
+		return nil
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "different files")
+	require.False(t, called)
+
+	got, err := os.ReadFile(filepath.Join(dataDir, ConfigFileName))
+	require.NoError(t, err)
+	require.Equal(t, original, got)
+	otherGot, err := os.ReadFile(filepath.Join(otherDir, ConfigFileName))
+	require.NoError(t, err)
+	require.Contains(t, string(otherGot), otherKey)
+}
+
+func TestCloudflarePermitGatesWorkAndRelease(t *testing.T) {
+	dir := t.TempDir()
+	writeInjectedConfig(t, dir)
+	useCloudflareDataDir(t, dir)
+	t.Setenv("SUB2API_WRITER_PERMIT", "production")
+
+	called := false
+	err := BeginProcessWork(func() error {
+		called = true
+		return nil
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "SUB2API_WRITER_PERMIT=isolated")
+	require.False(t, called)
+
+	t.Setenv("SUB2API_WRITER_PERMIT", "isolated")
+	t.Setenv("SUB2API_ISOLATION", "")
+	err = BeginProcessWork(func() error {
+		called = true
+		return nil
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "SUB2API_ISOLATION=isolated")
+	require.False(t, called)
+
+	t.Setenv("SUB2API_ISOLATION", "isolated")
+	require.NoError(t, BeginProcessWork(func() error { return nil }))
+
+	lease, err := HoldIsolatedLease()
+	require.NoError(t, err)
+	require.True(t, lease.Held())
+	require.False(t, lease.RefuseHTTP())
+
+	err = lease.StopThenRelease(nil, nil)
+	require.Error(t, err)
+	require.False(t, lease.Released())
+	require.True(t, lease.RefuseHTTP())
+
+	order := []string{}
+	err = lease.StopThenRelease(
+		func() error {
+			order = append(order, "stop")
+			return errors.New("stop failed")
+		},
+		func() error {
+			order = append(order, "drain")
+			return nil
+		},
+	)
+	require.Error(t, err)
+	require.Equal(t, []string{"stop"}, order)
+	require.False(t, lease.Released())
+
+	err = lease.StopThenRelease(
+		func() error {
+			order = append(order, "stop")
+			return nil
+		},
+		func() error {
+			order = append(order, "drain")
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"stop", "stop", "drain"}, order)
+	require.True(t, lease.Released())
+	require.False(t, lease.Held())
+	require.True(t, lease.RefuseHTTP())
 }

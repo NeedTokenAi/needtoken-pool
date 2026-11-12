@@ -5,23 +5,28 @@ import { bindCandidate, selfTest } from "../candidate-check.mjs";
 import {
   INACTIVITY_TIMEOUT_MS,
   INSTANCE,
+  LIMITS,
+  READINESS_WAIT_MS,
   SIGTERM,
   SINGLETON_NAME,
   WATCHDOG_INTERVAL_MS,
-  acquireWriter,
-  assertWriter,
   containerEnv,
+  containerRequest,
   createSession,
   handleRequest,
-  initialFence,
+  planRecovery,
   proxyResponse,
-  recoverDeadWriter,
   resolveSingletonId,
+  schedulerWait,
   singletonName,
   startOptions,
 } from "./runtime.js";
 
 const DIGEST = `sha256:${"ab".repeat(32)}`;
+const PREVIOUS = `sha256:${"cd".repeat(32)}`;
+const SHA = "a".repeat(40);
+const PREVIOUS_SHA = "b".repeat(40);
+const APPROVED = [{ role: "current", digest: DIGEST, sha: SHA }];
 
 function memoryStorage() {
   const values = new Map();
@@ -44,22 +49,32 @@ function fakeContainer() {
   let running = false;
   const signals = [];
   let started = null;
+  let starts = 0;
   const timeouts = [];
-  return {
+  const container = {
     signals,
     timeouts,
     images: { pool: DIGEST },
+    failStart: false,
+    exitCode: 0,
     get running() {
       return running;
     },
     set running(value) {
       running = value;
     },
+    get starts() {
+      return starts;
+    },
     start(options) {
+      if (container.failStart) {
+        throw new Error("start failed");
+      }
       if (running) {
         throw new Error("already running");
       }
       started = options;
+      starts += 1;
       running = true;
     },
     started: () => started,
@@ -70,25 +85,48 @@ function fakeContainer() {
       signals.push(number);
     },
     async monitor() {
+      if (container.exitCode !== 0) {
+        const error = new Error("container exited");
+        error.exitCode = container.exitCode;
+        throw error;
+      }
       running = false;
     },
   };
+  return container;
 }
 
 function healthPort(statuses, stream) {
   let healthCalls = 0;
+  let seen;
   return {
     get healthCalls() {
       return healthCalls;
     },
-    async fetch(url, init) {
-      if (String(url).endsWith("/health")) {
+    get seen() {
+      return seen;
+    },
+    async fetch(input, init) {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith("/health")) {
         const status = statuses[Math.min(healthCalls, statuses.length - 1)];
         healthCalls += 1;
-        return { status };
+        if (status === "ECONNREFUSED") {
+          const error = new Error("connect ECONNREFUSED 127.0.0.1");
+          error.code = "ECONNREFUSED";
+          throw error;
+        }
+        return {
+          status,
+          ok: status === 200,
+          body: { cancel: async () => {} },
+          init,
+        };
       }
+      seen = input;
       return {
         status: 200,
+        ok: true,
         headers: { "content-type": "text/event-stream" },
         body: stream,
         init,
@@ -107,9 +145,10 @@ function sessionWith(overrides = {}) {
     port,
     storage,
     now: () => 1_000,
-    readiness: overrides.readiness ?? { attempts: 3, sleep: async () => {} },
-    fence: overrides.fence,
+    approved: overrides.approved ?? APPROVED,
+    readiness: overrides.readiness ?? { attempts: 3, wait: async () => {} },
     secretBindings: overrides.secretBindings,
+    env: overrides.env,
   });
   return { session, container, storage, port };
 }
@@ -121,53 +160,150 @@ test("routes every request to the code-enforced singleton", () => {
   assert.throws(() => resolveSingletonId("user-123"), /rejects instance/);
   const index = readFileSync(new URL("./index.js", import.meta.url), "utf8");
   assert.match(index, /resolveSingletonId\(singletonName\(request\)\)/);
-  assert.match(index, /idFromName\(name\)/);
+  assert.match(index, /getByName\(name\)/);
   assert.doesNotMatch(index, /idFromName\(request/);
 });
 
-test("start options use the digest, internet, and no generated secrets", () => {
-  const options = startOptions({ pool: DIGEST }, { JWT_SECRET: "fixture-value" });
+test("start options use an approved digest and isolated bindings", () => {
+  const options = startOptions({ pool: DIGEST }, { JWT_SECRET: "fixture-value" }, APPROVED);
   assert.equal(options.image, DIGEST);
   assert.equal(options.enableInternet, true);
   assert.deepEqual(options.instance, INSTANCE);
   assert.equal(options.instance.vcpu >= 0.0625, true);
   assert.equal(options.instance.memoryMib >= 256, true);
   assert.equal(options.instance.diskMb >= 2000, true);
+  assert.equal(options.limits.mock, true);
+  assert.equal(options.limits.notOnARealAccount, true);
+  assert.equal(options.limits.notASixHourRun, true);
+  assert.equal(options.limits.durableObjectBeta, true);
+  assert.equal(options.limits.stopsOldProduction, false);
   assert.equal(options.env.SUB2API_RUNTIME, "cloudflare");
   assert.equal(options.env.SKIP_SETUP, "true");
+  assert.equal(options.env.SUB2API_ISOLATION, "isolated");
+  assert.equal(options.env.SUB2API_WRITER_PERMIT, "isolated");
   assert.equal(Object.hasOwn(options.env, "AUTO_SETUP"), false);
   assert.equal(options.env.JWT_SECRET, "fixture-value");
   assert.throws(() => containerEnv({ JWT_SECRET: "" }), /refusing empty secret binding/);
+  assert.throws(() => containerEnv({ SUB2API_WRITER_PERMIT: "production" }), /isolated bindings only/);
+  assert.throws(() => startOptions({ pool: DIGEST }, {}, []), /not tied to a build source/);
+  assert.throws(
+    () => startOptions({ pool: `sha256:${"0".repeat(64)}` }, {}, [{
+      role: "current",
+      digest: `sha256:${"0".repeat(64)}`,
+      sha: SHA,
+    }]),
+    /not tied to a build source/,
+  );
 });
 
-test("readiness blocks traffic until health returns 200", async () => {
-  const port = healthPort([503, 503, 200]);
-  const { session } = sessionWith({
+test("scheduler.wait is the readiness retry", async () => {
+  const waits = [];
+  await schedulerWait(READINESS_WAIT_MS, {
+    wait: async (milliseconds) => {
+      waits.push(milliseconds);
+    },
+  });
+  assert.deepEqual(waits, [READINESS_WAIT_MS]);
+  await assert.rejects(() => schedulerWait(READINESS_WAIT_MS, {}), /scheduler\.wait is required/);
+});
+
+test("a closed port is retried until health returns 200", async () => {
+  const waits = [];
+  const port = healthPort(["ECONNREFUSED", "ECONNREFUSED", 200]);
+  const { session, container } = sessionWith({
     port,
-    readiness: { attempts: 3, sleep: async () => {} },
+    readiness: {
+      attempts: 3,
+      waitMs: READINESS_WAIT_MS,
+      wait: async (milliseconds) => {
+        waits.push(milliseconds);
+      },
+    },
   });
   const response = await session.fetch(new Request("https://pool.example/v1/chat"));
   assert.equal(response.status, 200);
   assert.equal(port.healthCalls, 3);
+  assert.deepEqual(waits, [READINESS_WAIT_MS, READINESS_WAIT_MS]);
   assert.equal(session.state.ready, true);
-  assert.equal(session.state.container.started().image, DIGEST);
+  assert.equal(container.starts, 1);
+});
+
+test("start failure still arms the alarm and a later alarm can start", async () => {
+  const container = fakeContainer();
+  container.failStart = true;
+  const { session, storage } = sessionWith({ container });
+  await assert.rejects(() => session.alarm(), /start failed/);
+  assert.equal(session.state.started, false);
+  assert.equal(session.state.ready, false);
+  assert.deepEqual(storage.alarms, [1_000 + WATCHDOG_INTERVAL_MS]);
+  container.failStart = false;
+  await session.alarm();
+  assert.equal(container.running, true);
+  assert.equal(container.starts, 1);
+});
+
+test("a non-zero exit does not stick in draining and can start again", async () => {
+  const container = fakeContainer();
+  const { session } = sessionWith({ container });
+  await session.alarm();
+  container.exitCode = 1;
+  await session.noteExit();
+  assert.equal(session.state.lifecycle, "stopped");
+  assert.equal(session.state.started, false);
+  assert.notEqual(session.state.lifecycle, "draining");
+  container.exitCode = 0;
+  container.running = false;
+  session.state.started = true;
+  await session.alarm();
+  assert.equal(container.starts, 2);
+  assert.equal(container.running, true);
+});
+
+test("a rebuilt durable object arms the alarm and restarts a stopped container", async () => {
+  const storage = memoryStorage();
+  const firstContainer = fakeContainer();
+  const first = sessionWith({ storage, container: firstContainer });
+  await first.session.alarm();
+  assert.equal(firstContainer.running, true);
+
+  const rebuilt = fakeContainer();
+  const second = sessionWith({ storage, container: rebuilt });
+  second.session.state.started = true;
+  await second.session.onStart();
+  assert.equal(second.session.state.started, false);
+  assert.equal(second.session.state.ready, false);
+  assert.equal(storage.alarms.length >= 1, true);
+  assert.equal(rebuilt.running, false);
+  await second.session.alarm();
+  assert.equal(rebuilt.starts, 1);
+  assert.equal(rebuilt.running, true);
+});
+
+test("zero traffic still arms the first alarm", async () => {
+  const { session, storage, container } = sessionWith();
+  await session.onStart();
+  assert.equal(container.running, false);
+  assert.equal(container.starts, 0);
+  assert.deepEqual(storage.alarms, [1_000 + WATCHDOG_INTERVAL_MS]);
 });
 
 test("unreadiness does not proxy and the watchdog still reschedules", async () => {
+  const waits = [];
   const port = healthPort([503]);
   const { session, storage, container } = sessionWith({
     port,
-    readiness: { attempts: 2, sleep: async () => {} },
+    readiness: {
+      attempts: 2,
+      wait: async (milliseconds) => {
+        waits.push(milliseconds);
+      },
+    },
   });
   await assert.rejects(() => session.alarm(), /not ready/);
   assert.equal(session.state.ready, false);
   assert.equal(container.running, true);
+  assert.deepEqual(waits, [READINESS_WAIT_MS]);
   assert.deepEqual(storage.alarms, [1_000 + WATCHDOG_INTERVAL_MS]);
-  const again = healthPort([503]);
-  session.state.port = again;
-  await assert.rejects(() => session.alarm(), /not ready/);
-  assert.equal(container.started() !== null, true);
-  assert.equal(again.healthCalls, 2);
 });
 
 test("streaming proxy returns the upstream body without reading it", async () => {
@@ -187,91 +323,180 @@ test("streaming proxy returns the upstream body without reading it", async () =>
   assert.equal(pulled, false);
 });
 
-test("request body is forwarded as the same stream", async () => {
-  const requestBody = new ReadableStream();
-  let seen;
-  const port = {
-    async fetch(url, init) {
-      if (String(url).endsWith("/health")) {
-        return { status: 200 };
-      }
-      seen = init;
-      return { status: 200, headers: {}, body: null };
-    },
-  };
+test("SSE cancel follows the original request signal", async () => {
+  const controller = new AbortController();
+  const stream = new ReadableStream();
+  const port = healthPort([200], stream);
   const { session } = sessionWith({ port });
-  await handleRequest(session.state, {
-    url: "https://pool.example/v1/chat",
+  const request = new Request("https://pool.example/v1/chat", {
     method: "POST",
-    headers: new Headers(),
-    body: requestBody,
+    headers: { accept: "text/event-stream", "x-trace": "sse" },
+    body: new ReadableStream(),
+    duplex: "half",
+    signal: controller.signal,
   });
-  assert.equal(seen.body, requestBody);
-  assert.equal(seen.duplex, "half");
+  const pending = handleRequest(session.state, request);
+  controller.abort();
+  const response = await pending;
+  assert.equal(response.body, stream);
+  assert.equal(typeof response.text, "undefined");
+  const forwarded = port.seen;
+  assert.equal(forwarded instanceof Request, true);
+  assert.equal(forwarded.body instanceof ReadableStream, true);
+  assert.equal(new URL(forwarded.url).host, "container");
+  assert.equal(forwarded.headers.get("x-trace"), "sse");
+  assert.equal(forwarded.signal.aborted, true);
 });
 
-test("watchdog recovers a dead writer and refreshes a live one", async () => {
+test("websocket upgrade is forwarded to the container host", () => {
+  const request = new Request("https://pool.example/ws", {
+    headers: { Upgrade: "websocket", Connection: "Upgrade" },
+  });
+  const forwarded = containerRequest(request);
+  assert.equal(forwarded instanceof Request, true);
+  assert.equal(forwarded.url, "http://container/ws");
+  assert.equal(forwarded.headers.get("upgrade"), "websocket");
+  assert.equal(forwarded.headers.get("host"), null);
+});
+
+test("watchdog restarts a crashed container even if started was left true", async () => {
   const { session, container } = sessionWith();
   await session.alarm();
-  const first = session.state.fence.epoch;
   assert.equal(container.timeouts.at(-1), INACTIVITY_TIMEOUT_MS);
   await session.alarm();
-  assert.equal(session.state.fence.epoch, first);
+  assert.equal(container.starts, 1);
 
   container.running = false;
+  session.state.started = true;
+  session.state.ready = true;
   await session.alarm();
-  assert.equal(session.state.fence.epoch, first + 1);
+  assert.equal(container.starts, 2);
   assert.equal(container.running, true);
-  assert.throws(() => assertWriter(session.state.fence, first), /fenced/);
 });
 
-test("SIGTERM drain fences the old writer and does not signal SIGKILL", async () => {
+test("SIGTERM drain handles a refused monitor and does not signal SIGKILL", async () => {
   const { session, container } = sessionWith();
   await session.alarm();
-  const epoch = session.state.fence.epoch;
-  session.state.fence = { epoch, status: "draining" };
+  session.state.lifecycle = "draining";
   const blocked = await session.fetch(new Request("https://pool.example/v1/chat"));
   assert.equal(blocked.status, 503);
-  session.state.fence = { epoch, status: "active" };
+  session.state.lifecycle = "ready";
+  container.exitCode = 1;
   await session.drain();
   assert.deepEqual(container.signals, [SIGTERM]);
   assert.equal(container.signals.includes(9), false);
-  assert.equal(session.state.fence.status, "idle");
+  assert.equal(session.state.lifecycle, "stopped");
   assert.equal(container.running, false);
+  container.exitCode = 0;
   const during = await session.fetch(new Request("https://pool.example/v1/chat"));
-  assert.notEqual(during.status, undefined);
-  await session.alarm();
-  assert.equal(session.state.fence.epoch, epoch + 1);
-  assert.throws(() => assertWriter(session.state.fence, epoch), /fenced/);
+  assert.equal(during.status, 200);
+  assert.equal(container.starts, 2);
 });
 
-test("a second writer cannot acquire the active fence", () => {
-  const active = acquireWriter(initialFence());
-  assert.throws(() => acquireWriter(active), /already held/);
-  assert.throws(() => recoverDeadWriter({ epoch: 1, status: "draining" }), /drain in progress/);
+test("losing the isolated permit stops writers and drains before release", async () => {
+  const { session } = sessionWith();
+  assert.equal(session.state.permit.stopsOldProduction, false);
+  const early = await session.fetch(new Request("https://pool.example/v1/chat"));
+  assert.equal(early.status, 200);
+  await assert.rejects(() => session.releasePermit(), /background stop and drain/);
+  assert.equal(session.state.permit.released, false);
+  const refused = await session.fetch(new Request("https://pool.example/v1/chat"));
+  assert.equal(refused.status, 503);
+
+  const order = [];
+  await session.releasePermit(
+    async () => {
+      order.push("stop");
+    },
+    async () => {
+      order.push("drain");
+    },
+  );
+  assert.deepEqual(order, ["stop", "drain"]);
+  assert.equal(session.state.permit.released, true);
+  assert.equal(session.state.permit.stopsOldProduction, false);
+  assert.throws(() => createSession({
+    container: fakeContainer(),
+    images: { pool: DIGEST },
+    port: healthPort([200]),
+    storage: memoryStorage(),
+    env: { SUB2API_ISOLATION: "production", SUB2API_WRITER_PERMIT: "production" },
+  }), /isolated bindings only/);
 });
 
-test("constructor refreshes the inactivity timeout when the container is already running", async () => {
+test("constructor refreshes the inactivity timeout and arms an alarm", async () => {
   const container = fakeContainer();
-  container.start(startOptions(container.images, {}));
-  const { session } = sessionWith({ container, fence: { epoch: 4, status: "active" } });
+  container.start(startOptions(container.images, {}, APPROVED));
+  const { session, storage } = sessionWith({ container });
   await session.onStart();
   assert.equal(container.timeouts.at(-1), INACTIVITY_TIMEOUT_MS);
+  assert.deepEqual(storage.alarms, [1_000 + WATCHDOG_INTERVAL_MS]);
+  assert.equal(session.state.started, false);
 });
 
-test("candidate check binds main SHA and digest without deploying", () => {
+test("two recorded digests are not a rollback", () => {
+  const one = planRecovery(APPROVED);
+  assert.equal(one.executable, false);
+  assert.equal(one.performsRollback, false);
+  assert.equal(one.previousRecorded, false);
+  assert.match(one.reason, /not available/);
+
+  const two = planRecovery([
+    ...APPROVED,
+    { role: "previous", digest: PREVIOUS, sha: PREVIOUS_SHA },
+  ]);
+  assert.equal(two.previousRecorded, true);
+  assert.equal(two.executable, false);
+  assert.equal(two.performsRollback, false);
+  assert.equal(two.rollbackPerformed, false);
+  assert.equal(two.digest, PREVIOUS);
+  assert.equal(two.sha, PREVIOUS_SHA);
+  assert.equal(two.notOnARealAccount, true);
+  assert.equal(two.durableObjectBeta, true);
+  assert.match(two.reason, /not a rollback/);
+  assert.equal(LIMITS.rollbackPerformed, false);
+});
+
+test("candidate check ties the digest to its build source and does not deploy", () => {
   const sha = "35e730955c955a4901619fa9a92c68904afcb934";
   const digest = `sha256:${"cd".repeat(32)}`;
-  const bound = bindCandidate({ mainSha: sha, digest, originMainSha: sha });
+  const bound = bindCandidate({
+    mainSha: sha,
+    digest,
+    originMainSha: sha,
+    buildSourceSha: sha,
+    headSha: sha,
+  });
   assert.equal(bound.deployed, false);
+  assert.equal(bound.rollback, false);
   assert.equal(bound.pgDump, "unverified");
-  assert.equal(bound.mainSha, sha);
+  assert.equal(bound.buildSourceSha, sha);
   assert.throws(
-    () => bindCandidate({ mainSha: sha, digest, originMainSha: "a".repeat(40) }),
-    /not origin\/main/,
+    () => bindCandidate({
+      mainSha: sha,
+      digest,
+      originMainSha: sha,
+      buildSourceSha: "c".repeat(40),
+      headSha: sha,
+    }),
+    /build source/,
   );
-  assert.throws(() => bindCandidate({ mainSha: "abc", digest, originMainSha: "abc" }), /40 hex/);
+  assert.throws(
+    () => bindCandidate({
+      mainSha: sha,
+      digest: `sha256:${"0".repeat(64)}`,
+      originMainSha: sha,
+      buildSourceSha: sha,
+      headSha: sha,
+    }),
+    /fail-closed/,
+  );
+  assert.throws(
+    () => bindCandidate({ mainSha: sha, digest, originMainSha: sha, buildSourceSha: sha }),
+    /build source/,
+  );
   const result = selfTest();
   assert.equal(result.deployed, false);
+  assert.equal(result.rollback, false);
   assert.equal(result.pgDump, "unverified");
 });

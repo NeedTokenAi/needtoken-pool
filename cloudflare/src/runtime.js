@@ -2,7 +2,20 @@ export const SINGLETON_NAME = "needtoken-pool";
 export const CONTAINER_PORT = 8080;
 export const INACTIVITY_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 export const WATCHDOG_INTERVAL_MS = 60 * 1000;
+export const READINESS_ATTEMPTS = 20;
+export const READINESS_WAIT_MS = 200;
 export const SIGTERM = 15;
+
+// Local mock labels. These values were not measured on a Cloudflare account,
+// the six-hour inactivity limit was not run, and durable_object is public beta.
+export const LIMITS = {
+  mock: true,
+  notOnARealAccount: true,
+  notASixHourRun: true,
+  durableObjectBeta: true,
+  stopsOldProduction: false,
+  rollbackPerformed: false,
+};
 
 // Placeholder size that meets the durable_object custom minimums
 // (vcpu >= 1/16, memory >= 256 MiB, disk >= 2000 MB) and stays under the
@@ -26,14 +39,24 @@ export const SECRET_BINDING_NAMES = [
   "REDIS_ENABLE_TLS",
 ];
 
+const PLACEHOLDER_DIGEST = `sha256:${"0".repeat(64)}`;
+
 export function mandatoryContainerEnv() {
   return {
     SUB2API_RUNTIME: "cloudflare",
     SKIP_SETUP: "true",
+    SUB2API_ISOLATION: "isolated",
+    SUB2API_WRITER_PERMIT: "isolated",
   };
 }
 
 export function containerEnv(bindings = {}) {
+  if (bindings.SUB2API_ISOLATION && bindings.SUB2API_ISOLATION !== "isolated") {
+    throw new Error("candidate allows isolated bindings only");
+  }
+  if (bindings.SUB2API_WRITER_PERMIT && bindings.SUB2API_WRITER_PERMIT !== "isolated") {
+    throw new Error("candidate allows isolated bindings only");
+  }
   const env = mandatoryContainerEnv();
   for (const name of SECRET_BINDING_NAMES) {
     if (!Object.prototype.hasOwnProperty.call(bindings, name)) {
@@ -51,16 +74,41 @@ export function containerEnv(bindings = {}) {
   return env;
 }
 
-export function startOptions(images, bindings) {
+export function isolatedPermit(env = {}) {
+  const isolation = env.SUB2API_ISOLATION ?? "isolated";
+  const permit = env.SUB2API_WRITER_PERMIT ?? "isolated";
+  if (isolation !== "isolated" || permit !== "isolated") {
+    throw new Error("candidate allows isolated bindings only");
+  }
+  return {
+    isolated: true,
+    held: true,
+    lost: false,
+    released: false,
+    stopsOldProduction: false,
+  };
+}
+
+function approvedSlot(image, approved) {
+  return (approved ?? []).find((slot) => {
+    return slot?.digest === image
+      && slot.digest !== PLACEHOLDER_DIGEST
+      && /^sha256:[0-9a-f]{64}$/.test(slot.digest ?? "")
+      && /^[0-9a-f]{40}$/.test(slot.sha ?? "");
+  });
+}
+
+export function startOptions(images, bindings, approved) {
   const image = images?.pool;
-  if (!image) {
-    throw new Error("missing pool image reference");
+  if (!image || !approvedSlot(image, approved)) {
+    throw new Error("image is not tied to a build source");
   }
   return {
     image,
     enableInternet: true,
     instance: INSTANCE,
     env: containerEnv(bindings),
+    limits: LIMITS,
   };
 }
 
@@ -75,142 +123,150 @@ export function resolveSingletonId(requested) {
   return SINGLETON_NAME;
 }
 
-export function initialFence() {
-  return { epoch: 0, status: "idle" };
-}
-
-export function acquireWriter(fence) {
-  if (fence.status === "active" || fence.status === "draining") {
-    throw new Error("fenced: writer already held");
+// scheduler.wait is the Workers scheduler global. Deployed timers do not
+// advance during CPU-only execution; this wait runs between failed port fetches.
+export async function schedulerWait(milliseconds, schedulerImpl = globalThis.scheduler) {
+  if (!schedulerImpl || typeof schedulerImpl.wait !== "function") {
+    throw new Error("scheduler.wait is required");
   }
-  return { epoch: fence.epoch + 1, status: "active" };
-}
-
-export function assertWriter(fence, epoch) {
-  if (fence.status !== "active" || fence.epoch !== epoch) {
-    throw new Error("fenced");
-  }
-}
-
-export function beginDrain(fence, epoch) {
-  assertWriter(fence, epoch);
-  return { epoch, status: "draining" };
-}
-
-export function finishDrain(fence, epoch) {
-  if (fence.status !== "draining" || fence.epoch !== epoch) {
-    throw new Error("fenced");
-  }
-  return { epoch, status: "idle" };
-}
-
-export function recoverDeadWriter(fence) {
-  if (fence.status === "draining") {
-    throw new Error("fenced: drain in progress");
-  }
-  if (fence.status !== "active") {
-    throw new Error("fenced: writer is not active");
-  }
-  return { epoch: fence.epoch + 1, status: "active" };
+  await schedulerImpl.wait(milliseconds);
 }
 
 export async function waitUntilReady(fetchHealth, options = {}) {
-  const attempts = options.attempts ?? 5;
-  const sleep = options.sleep ?? (async () => {});
-  let last = 0;
-  for (let i = 0; i < attempts; i += 1) {
-    const response = await fetchHealth();
-    last = response?.status ?? 0;
-    if (last === 200) {
-      return;
+  const attempts = options.attempts ?? READINESS_ATTEMPTS;
+  const wait = options.wait ?? ((milliseconds) => schedulerWait(milliseconds, options.scheduler));
+  const waitMs = options.waitMs ?? READINESS_WAIT_MS;
+  let lastError = new Error("container not ready");
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await fetchHealth();
+      if (response?.body && typeof response.body.cancel === "function") {
+        await response.body.cancel();
+      }
+      if (response?.ok || response?.status === 200) {
+        return;
+      }
+      lastError = new Error(`container not ready: ${response?.status ?? 0}`);
+    } catch (error) {
+      lastError = new Error(`container not ready: ${error?.message ?? "closed port"}`);
     }
-    if (i + 1 < attempts) {
-      await sleep();
+    if (attempt + 1 < attempts) {
+      await wait(waitMs);
     }
   }
-  throw new Error(`container not ready: ${last}`);
+  throw lastError;
+}
+
+export function containerRequest(request) {
+  const url = new URL(request.url);
+  url.protocol = "http:";
+  url.host = "container";
+  const forwarded = new Request(url, request);
+  forwarded.headers.delete("host");
+  return forwarded;
 }
 
 export function proxyResponse(upstream) {
-  return {
-    status: upstream.status,
-    headers: upstream.headers,
-    body: upstream.body,
-  };
+  return upstream;
 }
 
-async function persistFence(state) {
-  await state.storage.put("fence", state.fence);
+function markStopped(state) {
+  state.ready = false;
+  state.started = false;
+  state.lifecycle = "stopped";
+  try {
+    state.container.running = false;
+  } catch {
+    // The platform owns Container.running.
+  }
+}
+
+export async function noteExit(state) {
+  try {
+    await state.container.monitor();
+  } catch {
+    // monitor() rejects with Error.exitCode when the container exits non-zero.
+  } finally {
+    markStopped(state);
+  }
 }
 
 export async function ensureStarted(state) {
-  if (state.fence.status === "draining") {
-    throw new Error("fenced: drain in progress");
+  if (state.lifecycle === "draining") {
+    throw new Error("container is draining");
   }
   if (!state.container.running) {
-    state.fence = state.fence.status === "active"
-      ? recoverDeadWriter(state.fence)
-      : acquireWriter(state.fence);
+    state.started = false;
     state.ready = false;
-    await persistFence(state);
-    state.container.start(startOptions(state.images, state.secretBindings));
-    await state.container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
-  } else if (state.fence.status !== "active") {
-    state.fence = acquireWriter(state.fence);
-    await persistFence(state);
+    state.lifecycle = "starting";
+    try {
+      state.container.start(startOptions(state.images, state.secretBindings, state.approved));
+    } catch (error) {
+      markStopped(state);
+      throw error;
+    }
+    state.started = true;
     await state.container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
   }
   if (!state.ready) {
-    await waitUntilReady(
-      () => state.port.fetch("http://container/health"),
-      state.readiness,
-    );
+    try {
+      await waitUntilReady(
+        () => state.port.fetch("http://container/health", {
+          signal: AbortSignal.timeout(1000),
+        }),
+        state.readiness,
+      );
+    } catch (error) {
+      state.ready = false;
+      state.lifecycle = "stopped";
+      throw error;
+    }
     state.ready = true;
+    state.lifecycle = "ready";
   } else {
     await state.container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
   }
-  state.epoch = state.fence.epoch;
-  return state.fence;
 }
 
 export async function handleRequest(state, request) {
-  if (state.fence.status === "draining") {
+  if (!state.permit?.held || state.permit.lost || state.permit.released || !state.permit.isolated) {
+    return new Response("isolated writer permit is not held", { status: 503 });
+  }
+  if (state.lifecycle === "draining") {
     return new Response("draining", { status: 503 });
   }
   await ensureStarted(state);
-  assertWriter(state.fence, state.epoch);
-  const url = new URL(request.url);
-  const init = {
-    method: request.method,
-    headers: request.headers,
-  };
-  if (request.body) {
-    init.body = request.body;
-    init.duplex = "half";
-  }
-  const upstream = await state.port.fetch(
-    `http://container${url.pathname}${url.search}`,
-    init,
-  );
-  const proxied = proxyResponse(upstream);
-  return new Response(proxied.body, {
-    status: proxied.status,
-    headers: proxied.headers,
-  });
+  return proxyResponse(await state.port.fetch(containerRequest(request)));
 }
 
 export async function drain(state) {
-  if (state.fence.status !== "active") {
-    throw new Error("no active writer to drain");
-  }
-  const epoch = state.fence.epoch;
-  state.fence = beginDrain(state.fence, epoch);
+  state.lifecycle = "draining";
   state.ready = false;
-  await persistFence(state);
-  state.container.signal(SIGTERM);
-  await state.container.monitor();
-  state.fence = finishDrain(state.fence, epoch);
-  await persistFence(state);
+  try {
+    if (state.container.running) {
+      state.container.signal(SIGTERM);
+    }
+    await state.container.monitor();
+  } catch {
+    // A refused monitor still finishes the drain so a later start can run.
+  } finally {
+    markStopped(state);
+  }
+}
+
+// HTTP 503 is not the release. Background writes stop and the process drains first.
+export async function releasePermit(state, stopBackground, drainProcess) {
+  if (!state.permit?.isolated || state.permit.stopsOldProduction) {
+    throw new Error("candidate allows isolated bindings only");
+  }
+  state.permit.lost = true;
+  if (typeof stopBackground !== "function" || typeof drainProcess !== "function") {
+    throw new Error("permit release requires background stop and drain");
+  }
+  await stopBackground();
+  await drainProcess();
+  state.permit.held = false;
+  state.permit.released = true;
 }
 
 export async function runWatchdog(state) {
@@ -222,9 +278,47 @@ export async function runWatchdog(state) {
 }
 
 export async function onDurableObjectStart(state) {
+  state.ready = false;
+  state.started = false;
   if (state.container?.running) {
     await state.container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
   }
+  await state.storage.setAlarm(state.now() + WATCHDOG_INTERVAL_MS);
+}
+
+export function recoveryState(slots) {
+  const approved = (slots ?? []).filter((slot) => approvedSlot(slot?.digest, [slot]));
+  const digests = new Set(approved.map((slot) => slot.digest));
+  return {
+    phase: "stopped",
+    slots: approved,
+    previousRecorded: digests.size >= 2,
+    executable: false,
+    rollbackPerformed: false,
+    mock: true,
+    notOnARealAccount: true,
+    notASixHourRun: true,
+    durableObjectBeta: true,
+  };
+}
+
+export function planRecovery(slots) {
+  const state = recoveryState(slots);
+  const previous = state.slots.find((slot) => slot.role === "previous");
+  if (!state.previousRecorded || !previous) {
+    return {
+      ...state,
+      performsRollback: false,
+      reason: "rollback is not available",
+    };
+  }
+  return {
+    ...state,
+    performsRollback: false,
+    digest: previous.digest,
+    sha: previous.sha,
+    reason: "two approved digests are recorded; switching them is not a rollback",
+  };
 }
 
 export function createSession(deps) {
@@ -233,12 +327,14 @@ export function createSession(deps) {
     images: deps.images,
     port: deps.port,
     secretBindings: deps.secretBindings ?? {},
+    approved: deps.approved ?? [],
     storage: deps.storage,
     now: deps.now ?? (() => Date.now()),
-    readiness: deps.readiness ?? { attempts: 5, sleep: async () => {} },
-    fence: deps.fence ?? initialFence(),
+    readiness: deps.readiness ?? { attempts: READINESS_ATTEMPTS, waitMs: READINESS_WAIT_MS },
+    permit: deps.permit ?? isolatedPermit(deps.env),
+    lifecycle: "stopped",
     ready: false,
-    epoch: deps.fence?.epoch ?? 0,
+    started: false,
   };
   return {
     state,
@@ -246,5 +342,7 @@ export function createSession(deps) {
     alarm: () => runWatchdog(state),
     fetch: (request) => handleRequest(state, request),
     drain: () => drain(state),
+    noteExit: () => noteExit(state),
+    releasePermit: (stopBackground, drainProcess) => releasePermit(state, stopBackground, drainProcess),
   };
 }

@@ -51,7 +51,6 @@ export class PoolContainer extends DurableObject {
 export default {
   async fetch(request, env) {
     const name = resolveSingletonId(singletonName(request));
-    const id = env.POOL.idFromName(name);
-    return env.POOL.get(id).fetch(request);
+    return env.POOL.getByName(name).fetch(request);
   },
 };

@@ -142,9 +142,33 @@ func runSetupServer() {
 }
 
 func runMainServer() {
+	var lease *setup.WriterLease
+	if config.CloudflareProfileEnabled() {
+		if err := setup.RequireIsolatedWriterPermit(); err != nil {
+			log.Fatalf("refusing to start: %v", err)
+		}
+		if _, err := config.ResolveCloudflareConfigPath(); err != nil {
+			log.Fatalf("refusing to start: %v", err)
+		}
+	}
+
 	cfg, err := config.LoadForBootstrap()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
+	}
+	if config.CloudflareProfileEnabled() {
+		expected, pathErr := config.ResolveCloudflareConfigPath()
+		if pathErr != nil {
+			log.Fatalf("refusing to start: %v", pathErr)
+		}
+		if err := config.ConfirmConfigFileUsed(expected); err != nil {
+			log.Fatalf("refusing to start: %v", err)
+		}
+		// This lease is local. The existing production process does not read it.
+		lease, err = setup.HoldIsolatedLease()
+		if err != nil {
+			log.Fatalf("refusing to start: %v", err)
+		}
 	}
 	if err := logger.Init(logger.OptionsFromConfig(cfg.Log)); err != nil {
 		log.Fatalf("Failed to initialize logger: %v", err)
@@ -162,7 +186,12 @@ func runMainServer() {
 	if err != nil {
 		log.Fatalf("Failed to initialize application: %v", err)
 	}
-	defer app.Cleanup()
+	if lease == nil {
+		defer app.Cleanup()
+	}
+	if config.CloudflareProfileEnabled() && (lease == nil || !lease.Held()) {
+		log.Fatalf("refusing to start background work without an isolated writer permit")
+	}
 	if app.PluginManager != nil {
 		if err := app.PluginManager.Start(context.Background()); err != nil {
 			log.Printf("Plugin manager started in degraded state: %v", err)
@@ -196,6 +225,18 @@ func runMainServer() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	if lease != nil {
+		log.Println("Stopping background writers and draining before releasing the isolated permit")
+		if err := lease.StopThenRelease(
+			func() error { app.Cleanup(); return nil },
+			func() error { return app.Server.Shutdown(ctx) },
+		); err != nil {
+			log.Printf("isolated permit release failed: %v", err)
+		}
+		log.Println("Server exited")
+		return
+	}
 
 	if err := app.Server.Shutdown(ctx); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)

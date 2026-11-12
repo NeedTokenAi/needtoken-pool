@@ -31,10 +31,26 @@ func PrepareProcessStart() error {
 	if err := GuardCloudflareStartup(); err != nil {
 		return err
 	}
+	if err := RequireIsolatedWriterPermit(); err != nil {
+		return err
+	}
 	if NeedsSetup() || AutoSetupEnabled() {
 		return fmt.Errorf("cloudflare profile refuses to enter setup")
 	}
 	return nil
+}
+
+// BeginProcessWork runs setup, migrations, or background start only after the
+// Cloudflare guard and the isolated writer permit both succeed. The permit is
+// local to this process. The existing production process does not read it.
+func BeginProcessWork(work func() error) error {
+	if err := PrepareProcessStart(); err != nil {
+		return err
+	}
+	if work == nil {
+		return nil
+	}
+	return work()
 }
 
 // GuardCloudflareStartup requires the original config file and install lock.
@@ -50,8 +66,11 @@ func GuardCloudflareStartup() error {
 		return errors.New("cloudflare profile requires AUTO_SETUP off")
 	}
 
-	configPath := GetConfigFilePath()
-	lockPath := GetInstallLockPath()
+	configPath, err := config.ResolveCloudflareConfigPath()
+	if err != nil {
+		return err
+	}
+	lockPath := config.InstalledLockFor(configPath)
 	configBytes, err := os.ReadFile(configPath)
 	if err != nil || len(bytes.TrimSpace(configBytes)) == 0 {
 		return fmt.Errorf("cloudflare profile missing original config %s", configPath)
