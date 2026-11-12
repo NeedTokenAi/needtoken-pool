@@ -9,11 +9,52 @@ permissions:
 
 jobs:
   shell:
-    runs-on: macos-15
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - name: Check deployment scripts
         run: |
+          set -euo pipefail
+          # apple-container.sh calls BSD stat and macOS plutil. Provide those two
+          # commands on Ubuntu so the job does not wait for a macOS runner.
+          shim="${RUNNER_TEMP:-/tmp}/macos-shims"
+          mkdir -p "$shim"
+          cat > "$shim/stat" << 'EOF'
+          #!/bin/sh
+          if [ "${1-}" = "-f" ]; then
+            format="${2-}"
+            shift 2
+            case "$format" in
+              %Lp) exec /usr/bin/stat -c '%a' "$@" ;;
+              %u) exec /usr/bin/stat -c '%u' "$@" ;;
+            esac
+            echo "unsupported stat format" >&2
+            exit 1
+          fi
+          exec /usr/bin/stat "$@"
+          EOF
+          cat > "$shim/plutil" << 'EOF'
+          #!/usr/bin/env python3
+          import json
+          import sys
+
+          args = sys.argv[1:]
+          if args[:1] != ["-extract"] or args[3:5] != ["-o", "-"] or len(args) != 6:
+              sys.stderr.write("unsupported plutil invocation\n")
+              raise SystemExit(1)
+          value = json.load(sys.stdin if args[5] == "-" else open(args[5]))
+          for part in args[1].split("."):
+              value = value[int(part)] if part.isdigit() else value[part]
+          if args[2] == "json":
+              sys.stdout.write(json.dumps(value) + "\n")
+          elif args[2] == "raw":
+              sys.stdout.write((value if isinstance(value, str) else json.dumps(value)) + "\n")
+          else:
+              sys.stderr.write("unsupported plutil format\n")
+              raise SystemExit(1)
+          EOF
+          chmod 755 "$shim/stat" "$shim/plutil"
+          export PATH="${shim}:${PATH}"
           /bin/bash -n deploy/apple-container.sh
           /bin/bash deploy/tests/apple-container-test.sh
           /bin/sh deploy/tests/docker-compose-security-test.sh

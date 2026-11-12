@@ -1,54 +1,68 @@
 name: Cloudflare staging image
 
 # Records the staging image. It does not deploy a Worker or touch production.
+# The published record has the git repository, sha256 digest, source SHA, and
+# run id. It does not include the registry address, because that address
+# contains CLOUDFLARE_ACCOUNT_ID and GitHub skips outputs that contain a secret.
+# Deploy pins the sha256 digest. The pushed tag is the Actions run id.
 
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   image:
     runs-on: ubuntu-latest
-    outputs:
-      digest: ${{ steps.record.outputs.digest }}
-      repository: ${{ steps.record.outputs.repository }}
-      sha: ${{ steps.record.outputs.sha }}
-      run_id: ${{ steps.record.outputs.run_id }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - name: Build and push the staging image
-        id: record
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          npx --yes wrangler@4.160.1 containers build . -p -t needtoken-pool-staging:isolated
-          registry="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/needtoken-pool-staging:isolated"
-          ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$registry" | awk '/^registry\.cloudflare\.com\/[A-Za-z0-9-]+\/needtoken-pool-staging@sha256:[0-9a-f]{64}$/ { print; exit }')"
-          if [ -z "$ref" ]; then
-            echo "registry digest was not produced" >&2
+          if [ -z "${CLOUDFLARE_ACCOUNT_ID}" ]; then
+            echo "CLOUDFLARE_ACCOUNT_ID is not set" >&2
             exit 1
           fi
-          {
-            echo "digest=${ref}"
-            echo "repository=${GITHUB_REPOSITORY}"
-            echo "sha=${GITHUB_SHA}"
-            echo "run_id=${GITHUB_RUN_ID}"
-          } >> "$GITHUB_OUTPUT"
-      - name: Record the image identity
-        run: |
-          {
-            echo '```json'
-            echo '{'
-            echo '  "source": "github-actions-build",'
-            echo '  "recorded": true,'
-            echo "  \"repository\": \"${{ steps.record.outputs.repository }}\","
-            echo "  \"sha\": \"${{ steps.record.outputs.sha }}\","
-            echo "  \"run_id\": \"${{ steps.record.outputs.run_id }}\","
-            echo "  \"digest\": \"${{ steps.record.outputs.digest }}\""
-            echo '}'
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          tag="${GITHUB_RUN_ID}"
+          npx --yes wrangler@4.160.1 containers build . -p -t "needtoken-pool-staging:${tag}"
+          registry="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/needtoken-pool-staging:${tag}"
+          ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$registry" | awk '/^registry\.cloudflare\.com\/[A-Za-z0-9-]+\/needtoken-pool-staging@sha256:[0-9a-f]{64}$/ { print; exit }')"
+          digest="${ref##*@}"
+          if ! printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "sha256 digest was not produced" >&2
+            exit 1
+          fi
+          record_dir="${RUNNER_TEMP}/build-record"
+          mkdir -p "$record_dir"
+          RECORD_DIGEST="$digest" python3 - << 'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          record = {
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "digest": os.environ["RECORD_DIGEST"],
+              "sha": os.environ["GITHUB_SHA"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+          }
+          text = json.dumps(record, indent=2) + "\n"
+          Path(os.environ["RUNNER_TEMP"], "build-record", "build-record.json").write_text(text)
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text("```json\n" + text + "```\n")
+          PY
+          record_file="${record_dir}/build-record.json"
+          if grep -q -F -- 'registry.cloudflare.com' "$record_file" "$GITHUB_STEP_SUMMARY"; then
+            echo "published record contains the registry address" >&2
+            exit 1
+          fi
+      - name: Upload the build record
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-record
+          path: ${{ runner.temp }}/build-record/build-record.json
+          if-no-files-found: error
+          retention-days: 90
