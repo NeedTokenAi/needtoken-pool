@@ -52,7 +52,7 @@ test("production wrangler config stays on workers.dev", () => {
   assert.equal(Object.hasOwn(config.vars, "REDIS_KEY_PREFIX"), false);
   assert.equal(Object.hasOwn(config.vars, "OPS_WRITES_ENABLED"), false);
   assert.equal(container.max_instances, 2);
-  assert.equal(container.instance_type, "lite");
+  assert.equal(container.instance_type, "basic");
   assert.equal(container.image.includes("Dockerfile"), false);
   assert.equal(container.image.includes("needtoken-pool-staging"), false);
   assert.match(container.image, /^registry\.cloudflare\.com\/ACCOUNT_ID\/needtoken-pool@sha256:DIGEST$/);

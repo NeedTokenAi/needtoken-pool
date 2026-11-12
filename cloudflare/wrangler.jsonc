@@ -15,8 +15,8 @@
       "image": "registry.cloudflare.com/ACCOUNT_ID/needtoken-pool@sha256:DIGEST",
       "max_instances": 2,
       // Default-policy custom sizes need at least 1 vCPU and 3 GiB per vCPU.
-      // 512 MiB is not legal there. lite is the smallest named instance type.
-      "instance_type": "lite"
+      // basic is the smallest named type at or above 512 MiB: 1/4 vCPU, 1 GiB.
+      "instance_type": "basic"
     }
   ],
   "durable_objects": {
