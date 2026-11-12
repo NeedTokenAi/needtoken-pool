@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { containerEnv } from "./env.js";
-import { notReadyResponse, waitForReady } from "./ready.js";
+import { dispatchReady, notReadyResponse, probeHealth, waitForReady } from "./ready.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -80,6 +80,12 @@ test("production wrangler config has no public route", () => {
   assert.equal(worker.includes("waitForReady("), true);
   assert.equal(worker.includes("notReadyResponse("), true);
   assert.equal(worker.includes("did not become ready"), false);
+  assert.equal(worker.includes("dispatchReady("), true);
+  assert.equal(worker.includes("HEALTH_PROBE_MS"), true);
+  const start = worker.indexOf("() => container.getTcpPort");
+  const forward = worker.slice(start, worker.indexOf(");", start));
+  assert.equal(forward.includes("catch"), false);
+  assert.equal(forward.includes("notReadyResponse"), false);
 });
 
 test("a closed port retries and then returns 503", async () => {
@@ -108,6 +114,52 @@ test("a closed port retries and then returns 503", async () => {
   const response = notReadyResponse();
   assert.equal(response.status, 503);
   assert.equal(response.headers.get("retry-after"), "15");
+});
+
+test("503 is only returned before the client request is forwarded", async () => {
+  let forwarded = 0;
+  const closed = await dispatchReady(async () => false, async () => {
+    forwarded += 1;
+    return new Response("sent");
+  });
+  assert.equal(closed.status, 503);
+  assert.equal(closed.headers.get("retry-after"), "15");
+  assert.equal(forwarded, 0);
+
+  const upstreamError = new Error("upstream failed after accept");
+  await assert.rejects(
+    () => dispatchReady(async () => true, async () => {
+      throw upstreamError;
+    }),
+    (error) => error === upstreamError,
+  );
+
+  const upstream = new Response("no", { status: 500 });
+  const passed = await dispatchReady(async () => true, async () => upstream);
+  assert.equal(passed, upstream);
+  assert.notEqual(passed.status, 503);
+});
+
+test("health probe stops when its timeout fires", async () => {
+  const result = await Promise.race([
+    probeHealth(
+      (signal) => new Promise((resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")));
+      }),
+      40,
+    ),
+    new Promise((resolve) => setTimeout(() => resolve("hung"), 300)),
+  ]);
+  assert.equal(result, false);
+
+  let sawSignal = false;
+  const ok = await probeHealth(async (signal) => {
+    sawSignal = signal instanceof AbortSignal;
+    return true;
+  }, 1_000);
+  assert.equal(ok, true);
+  assert.equal(sawSignal, true);
+  assert.equal(notReadyResponse().status, 503);
 });
 
 test("deploy workflows do not build or ship a separate image", () => {
