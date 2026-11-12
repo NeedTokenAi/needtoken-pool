@@ -45,8 +45,8 @@ func requireAllowedDatabaseHost() error {
 }
 
 // requireBackgroundConsumersOff stops this process from running the shared
-// Upstash queues and schedules. REDIS_KEY_PREFIX is not applied: the Redis
-// client has no key prefix, and queue names are fixed literals.
+// Upstash queues and schedules. A non-empty REDIS_KEY_PREFIX is applied to
+// every Redis key. An empty prefix leaves keys unchanged.
 func requireBackgroundConsumersOff() error {
 	if strings.TrimSpace(os.Getenv("SUB2API_BACKGROUND_CONSUMERS")) != "off" {
 		return errors.New("cloudflare profile requires SUB2API_BACKGROUND_CONSUMERS=off")
@@ -54,9 +54,9 @@ func requireBackgroundConsumersOff() error {
 	return nil
 }
 
-// RedisKeyPrefixApplied is false. Setting REDIS_KEY_PREFIX does not change keys.
+// RedisKeyPrefixApplied reports whether REDIS_KEY_PREFIX will rename keys.
 func RedisKeyPrefixApplied() bool {
-	return false
+	return strings.TrimSpace(os.Getenv("REDIS_KEY_PREFIX")) != ""
 }
 
 func nonTestWriterPermit(permit string) bool {

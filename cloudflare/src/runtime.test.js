@@ -537,7 +537,7 @@ test("formal openSession approval rejects a bare digest, hand-filled JSON, and a
       REDIS_HOST: "shared-upstash.example",
     }),
   );
-  assert.equal(shared.permit.redisKeyPrefixApplied, false);
+  assert.equal(shared.permit.redisKeyPrefixApplied, true);
   const passed = containerEnv(isolatedEnv());
   assert.equal(passed.SUB2API_BACKGROUND_CONSUMERS, "off");
   assert.equal(passed.REDIS_KEY_PREFIX, "staging:");

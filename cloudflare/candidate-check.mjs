@@ -207,6 +207,11 @@ export function selfTest() {
   if (stagingConfig.routes || stagingConfig.route || stagingConfig.workers_dev !== false) {
     throw new Error("staging config must not publish a production route");
   }
+  const hasMigrations = Array.isArray(stagingConfig.migrations) && stagingConfig.migrations.length > 0;
+  const hasDurableExport = Object.values(stagingConfig.exports ?? {}).some((entry) => entry?.type === "durable-object");
+  if (hasMigrations === hasDurableExport) {
+    throw new Error("staging config must set either durable object migrations or exports");
+  }
   if (!staging.includes("CONFIG_FILE") || !staging.includes("DATA_DIR") || !staging.includes("STAGING_TEST_JWT_SECRET")) {
     throw new Error("staging config must pass CONFIG_FILE, DATA_DIR, and the test JWT");
   }

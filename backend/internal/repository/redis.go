@@ -22,6 +22,7 @@ import (
 // 3. DialTimeout/ReadTimeout/WriteTimeout: 精确控制各阶段超时
 func InitRedis(cfg *config.Config) *redis.Client {
 	client := redis.NewClient(buildRedisOptions(cfg))
+	installRedisKeyPrefix(client, cfg.Redis.KeyPrefix)
 	if cfg.Server.EnableServerTiming {
 		client.AddHook(serverTimingRedisHook{})
 	}

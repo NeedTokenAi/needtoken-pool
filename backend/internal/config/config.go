@@ -1692,6 +1692,9 @@ type RedisConfig struct {
 	MinIdleConns int `mapstructure:"min_idle_conns"`
 	// EnableTLS: 是否启用 TLS/SSL 连接
 	EnableTLS bool `mapstructure:"enable_tls"`
+	// KeyPrefix 加在每条 Redis key、Lua KEYS、pub/sub channel、锁和限流 key 前。
+	// 空字符串不安装前缀，键名与现在完全一致。
+	KeyPrefix string `mapstructure:"key_prefix"`
 }
 
 func (r *RedisConfig) Address() string {
@@ -1993,6 +1996,7 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	cfg.OIDC.UsePKCEExplicit = hasExplicitConfigOrEnv("oidc_connect.use_pkce", "OIDC_CONNECT_USE_PKCE")
 	cfg.OIDC.ValidateIDTokenExplicit = hasExplicitConfigOrEnv("oidc_connect.validate_id_token", "OIDC_CONNECT_VALIDATE_ID_TOKEN")
 	cfg.Dashboard.KeyPrefix = strings.TrimSpace(cfg.Dashboard.KeyPrefix)
+	cfg.Redis.KeyPrefix = strings.TrimSpace(cfg.Redis.KeyPrefix)
 	cfg.CORS.AllowedOrigins = normalizeStringSlice(cfg.CORS.AllowedOrigins)
 	cfg.Security.ResponseHeaders.AdditionalAllowed = normalizeStringSlice(cfg.Security.ResponseHeaders.AdditionalAllowed)
 	cfg.Security.ResponseHeaders.ForceRemove = normalizeStringSlice(cfg.Security.ResponseHeaders.ForceRemove)
@@ -2314,6 +2318,7 @@ func setDefaults() {
 	viper.SetDefault("redis.pool_size", 1024)
 	viper.SetDefault("redis.min_idle_conns", 128)
 	viper.SetDefault("redis.enable_tls", false)
+	viper.SetDefault("redis.key_prefix", "")
 
 	// Batch Image queue
 	viper.SetDefault("batch_image.enabled", false)

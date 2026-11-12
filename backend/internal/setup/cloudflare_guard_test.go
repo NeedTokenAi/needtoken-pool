@@ -405,7 +405,7 @@ func TestCloudflareStagingDatabaseHostAllowlist(t *testing.T) {
 			})
 			require.NoError(t, err)
 			require.True(t, called)
-			require.False(t, RedisKeyPrefixApplied())
+			require.True(t, RedisKeyPrefixApplied())
 		})
 	}
 

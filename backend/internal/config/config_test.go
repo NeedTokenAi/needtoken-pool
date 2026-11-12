@@ -134,6 +134,19 @@ func TestLoadRedisUsernameFromEnvironment(t *testing.T) {
 	require.Equal(t, "app-user", cfg.Redis.Username)
 }
 
+func TestLoadRedisKeyPrefixFromEnvironment(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Empty(t, cfg.Redis.KeyPrefix)
+
+	resetViperWithJWTSecret(t)
+	t.Setenv("REDIS_KEY_PREFIX", " staging: ")
+	cfg, err = Load()
+	require.NoError(t, err)
+	require.Equal(t, "staging:", cfg.Redis.KeyPrefix)
+}
+
 func TestLoadHTTPIngressSafetyDefaults(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	cfg, err := Load()

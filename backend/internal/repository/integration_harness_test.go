@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -257,7 +256,8 @@ func testRedis(t *testing.T) *redisclient.Client {
 
 	opts := *integrationRedis.Options()
 	rdb := redisclient.NewClient(&opts)
-	rdb.AddHook(prefixHook{prefix: prefix})
+	rdb.AddHook(redisKeyPrefixHook{prefix: prefix})
+	redisClientPrefixes.Store(rdb, prefix)
 
 	t.Cleanup(func() {
 		ctx := context.Background()
@@ -292,86 +292,6 @@ func sanitizeRedisNamespace(name string) string {
 	name = strings.ReplaceAll(name, "/", "_")
 	name = strings.ReplaceAll(name, " ", "_")
 	return name
-}
-
-type prefixHook struct {
-	prefix string
-}
-
-func (h prefixHook) DialHook(next redisclient.DialHook) redisclient.DialHook { return next }
-
-func (h prefixHook) ProcessHook(next redisclient.ProcessHook) redisclient.ProcessHook {
-	return func(ctx context.Context, cmd redisclient.Cmder) error {
-		h.prefixCmd(cmd)
-		return next(ctx, cmd)
-	}
-}
-
-func (h prefixHook) ProcessPipelineHook(next redisclient.ProcessPipelineHook) redisclient.ProcessPipelineHook {
-	return func(ctx context.Context, cmds []redisclient.Cmder) error {
-		for _, cmd := range cmds {
-			h.prefixCmd(cmd)
-		}
-		return next(ctx, cmds)
-	}
-}
-
-func (h prefixHook) prefixCmd(cmd redisclient.Cmder) {
-	args := cmd.Args()
-	if len(args) < 2 {
-		return
-	}
-
-	prefixOne := func(i int) {
-		if i < 0 || i >= len(args) {
-			return
-		}
-
-		switch v := args[i].(type) {
-		case string:
-			if v != "" && !strings.HasPrefix(v, h.prefix) {
-				args[i] = h.prefix + v
-			}
-		case []byte:
-			s := string(v)
-			if s != "" && !strings.HasPrefix(s, h.prefix) {
-				args[i] = []byte(h.prefix + s)
-			}
-		}
-	}
-
-	switch strings.ToLower(cmd.Name()) {
-	case "get", "set", "setnx", "setex", "psetex", "incr", "decr", "incrby", "expire", "pexpire", "ttl", "pttl",
-		"hgetall", "hget", "hset", "hdel", "hincrbyfloat", "exists",
-		"zadd", "zcard", "zrange", "zrangebyscore", "zrem", "zremrangebyscore", "zrevrange", "zrevrangebyscore", "zscore":
-		prefixOne(1)
-	case "mget":
-		for i := 1; i < len(args); i++ {
-			prefixOne(i)
-		}
-	case "del", "unlink":
-		for i := 1; i < len(args); i++ {
-			prefixOne(i)
-		}
-	case "eval", "evalsha", "eval_ro", "evalsha_ro":
-		if len(args) < 3 {
-			return
-		}
-		numKeys, err := strconv.Atoi(fmt.Sprint(args[2]))
-		if err != nil || numKeys <= 0 {
-			return
-		}
-		for i := 0; i < numKeys && 3+i < len(args); i++ {
-			prefixOne(3 + i)
-		}
-	case "scan":
-		for i := 2; i+1 < len(args); i++ {
-			if strings.EqualFold(fmt.Sprint(args[i]), "match") {
-				prefixOne(i + 1)
-				break
-			}
-		}
-	}
 }
 
 // IntegrationRedisSuite provides a base suite for Redis integration tests.

@@ -1,7 +1,7 @@
 {
   // Isolated staging worker. Not a production route and not a cutover.
   // durable_object is public beta. No custom domain is set here.
-  // REDIS_KEY_PREFIX is not applied: the Go Redis client has no key prefix.
+  // REDIS_KEY_PREFIX is applied to every Redis key. An empty prefix is unchanged.
   // SUB2API_BACKGROUND_CONSUMERS=off keeps workers off the shared Upstash queues.
   // DATABASE_HOST is allowlisted in the process. Staging cannot use the production database.
   // The production DSN is not set here.
@@ -34,17 +34,12 @@
       "new_sqlite_classes": ["PoolContainer"]
     }
   ],
-  "exports": {
-    "PoolContainer": {
-      "type": "durable-object",
-      "storage": "sqlite"
-    }
-  },
   "vars": {
     "SUB2API_RUNTIME": "cloudflare",
     "SKIP_SETUP": "true",
     "SUB2API_ISOLATION": "isolated",
     "SUB2API_BACKGROUND_CONSUMERS": "off",
+    "REDIS_KEY_PREFIX": "staging:",
     "DATA_DIR": "/app/data",
     "CONFIG_FILE": "/app/data/config.yaml",
     "STAGING_TEST_JWT_SECRET": "staging-test-jwt-secret-not-production",

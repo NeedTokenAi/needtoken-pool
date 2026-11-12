@@ -61,12 +61,7 @@ const TEST_PERMITS = new Set([
   "staging",
 ]);
 
-// REDIS_KEY_PREFIX is accepted only as the unused literal "staging:".
-// The Go Redis client has no key prefix, so this value does not rename queues.
 export function assertBackgroundConsumersOff(env = {}) {
-  if (env.REDIS_KEY_PREFIX != null && env.REDIS_KEY_PREFIX !== "" && env.REDIS_KEY_PREFIX !== "staging:") {
-    throw new Error("REDIS_KEY_PREFIX is not applied; only an unused staging: value is accepted");
-  }
   if (env.SUB2API_BACKGROUND_CONSUMERS !== "off") {
     throw new Error("background consumers must be off while redis keys are shared");
   }
@@ -105,8 +100,8 @@ export function containerEnv(bindings = {}) {
     DATABASE_HOST: bindings.DATABASE_HOST,
     REDIS_HOST: bindings.REDIS_HOST,
   };
-  if (bindings.REDIS_KEY_PREFIX === "staging:") {
-    env.REDIS_KEY_PREFIX = "staging:";
+  if (typeof bindings.REDIS_KEY_PREFIX === "string" && bindings.REDIS_KEY_PREFIX.length > 0) {
+    env.REDIS_KEY_PREFIX = bindings.REDIS_KEY_PREFIX;
   }
   for (const name of ["CONFIG_FILE", "DATA_DIR", "STAGING_TEST_JWT_SECRET", "STAGING_TEST_TOTP_ENCRYPTION_KEY"]) {
     const value = bindings[name];
@@ -145,7 +140,7 @@ export function isolatedPermit(env = {}) {
     lost: false,
     released: false,
     stopsOldProduction: false,
-    redisKeyPrefixApplied: false,
+    redisKeyPrefixApplied: typeof env.REDIS_KEY_PREFIX === "string" && env.REDIS_KEY_PREFIX.length > 0,
   };
 }
 
