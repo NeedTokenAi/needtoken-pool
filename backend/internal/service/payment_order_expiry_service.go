@@ -55,6 +55,9 @@ func (s *PaymentOrderExpiryService) SetLeaderLock(lockCache LeaderLockCache, db 
 }
 
 func (s *PaymentOrderExpiryService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil || s.paymentSvc == nil || s.interval <= 0 {
 		return
 	}

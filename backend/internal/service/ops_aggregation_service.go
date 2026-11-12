@@ -89,6 +89,9 @@ func NewOpsAggregationService(
 }
 
 func (s *OpsAggregationService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil {
 		return
 	}

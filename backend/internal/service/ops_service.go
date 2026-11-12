@@ -239,7 +239,7 @@ func (s *OpsService) StartRuntimeSettingsRefresh(ctx context.Context) {
 }
 
 func (s *OpsService) startRuntimeSettingsRefresh(ctx context.Context, interval time.Duration, jitterPercent int, timeout time.Duration) {
-	if s == nil || s.settingRepo == nil {
+	if BackgroundConsumersSuppressed() || s == nil || s.settingRepo == nil {
 		return
 	}
 	if ctx == nil {

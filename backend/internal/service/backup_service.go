@@ -230,6 +230,9 @@ func (s *BackupService) SetLeaderLock(lockCache LeaderLockCache, db *sql.DB) {
 
 // Start 启动定时备份调度器并清理孤立记录
 func (s *BackupService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	s.cronSched = cron.New()
 	// A recently interrupted job may still belong to a live peer. Revisit it
 	// after the maximum execution window rather than deleting it at startup.

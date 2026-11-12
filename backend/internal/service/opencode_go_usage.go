@@ -395,6 +395,9 @@ func ProvideOpenCodeGoUsageService(
 }
 
 func (s *OpenCodeGoUsageService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil {
 		return
 	}

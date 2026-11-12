@@ -26,6 +26,20 @@ func TestBatchImageWorkerRuntime_QueueDisabledDoesNotStart(t *testing.T) {
 	require.NotPanics(t, runtime.Stop)
 }
 
+func TestBatchImageWorkerRuntime_ConsumersOffDoesNotReserve(t *testing.T) {
+	t.Setenv("SUB2API_BACKGROUND_CONSUMERS", "off")
+	queue := &blockingBatchImageRuntimeQueue{}
+	runtime := NewBatchImageWorkerRuntime(
+		NewBatchImageWorker(queue, &fakeBatchImageProcessor{}, BatchImageWorkerOptions{}),
+		&config.Config{BatchImage: config.BatchImageConfig{QueueEnabled: true}},
+	)
+
+	runtime.Start()
+
+	require.False(t, runtime.Running())
+	require.Zero(t, queue.reserveCalls.Load())
+}
+
 func TestBatchImageWorkerRuntime_QueueEnabledStartsAndStops(t *testing.T) {
 	queue := &blockingBatchImageRuntimeQueue{}
 	processor := &fakeBatchImageProcessor{}

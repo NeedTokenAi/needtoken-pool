@@ -46,10 +46,10 @@ func useCloudflareDataDir(t *testing.T, dir string) {
 	t.Setenv("SKIP_SETUP", "true")
 	t.Setenv("SUB2API_ISOLATION", "isolated")
 	t.Setenv("SUB2API_WRITER_PERMIT", "pool-writer-permit-fixture")
-	t.Setenv("DATABASE_HOST", "isolated-pool-db.example")
-	t.Setenv("REDIS_HOST", "isolated-pool-redis.example")
-	t.Setenv("POOL_ISOLATED_DATABASE_HOSTS", "isolated-pool-db.example")
-	t.Setenv("POOL_ISOLATED_REDIS_HOSTS", "isolated-pool-redis.example")
+	t.Setenv("DATABASE_HOST", "ep-aged-sunset-b33os2qw.c-4.ap-southeast-1.aws.neon.tech")
+	t.Setenv("REDIS_HOST", "existing-upstash.example")
+	t.Setenv("SUB2API_BACKGROUND_CONSUMERS", "off")
+	t.Setenv("REDIS_KEY_PREFIX", "staging:")
 }
 
 func writeInjectedConfig(t *testing.T, dir string) []byte {
@@ -337,16 +337,16 @@ func TestCloudflarePermitGatesWorkAndRelease(t *testing.T) {
 	require.True(t, lease.RefuseHTTP())
 }
 
-func TestCloudflareIsolatedHostRejectsProductionAndMarker(t *testing.T) {
+func TestCloudflareStagingDatabaseHostAllowlist(t *testing.T) {
 	dir := t.TempDir()
 	writeInjectedConfig(t, dir)
 	useCloudflareDataDir(t, dir)
 
 	for _, host := range []string{
-		"prod-pool-db.example",
-		"prod-pool-db.example-isolated",
-		"prod-pool-db.exampleisolated",
-		"isolated-pool-db.example.extra",
+		"other-db.example",
+		"ep-aged-sunset-b33os2qw.c-4.ap-southeast-1.aws.neon.tech-isolated",
+		"ep-aged-sunset-b33os2qw.c-4.ap-southeast-1.aws.neon.techisolated",
+		"ep-aged-sunset-b33os2qw-pooler.c-4.ap-southeast-1.aws.neon.tech-isolated",
 	} {
 		t.Run(host, func(t *testing.T) {
 			t.Setenv("DATABASE_HOST", host)
@@ -361,14 +361,31 @@ func TestCloudflareIsolatedHostRejectsProductionAndMarker(t *testing.T) {
 		})
 	}
 
-	t.Setenv("DATABASE_HOST", "isolated-pool-db.example")
-	t.Setenv("POOL_ISOLATED_DATABASE_HOSTS", `["isolated-pool-db.example"]`)
+	for _, host := range []string{
+		"ep-aged-sunset-b33os2qw.c-4.ap-southeast-1.aws.neon.tech",
+		"ep-aged-sunset-b33os2qw-pooler.c-4.ap-southeast-1.aws.neon.tech",
+	} {
+		t.Run(host, func(t *testing.T) {
+			t.Setenv("DATABASE_HOST", host)
+			t.Setenv("REDIS_HOST", "shared-upstash.example")
+			called := false
+			err := BeginProcessWork(func() error {
+				called = true
+				return nil
+			})
+			require.NoError(t, err)
+			require.True(t, called)
+			require.False(t, RedisKeyPrefixApplied())
+		})
+	}
+
+	t.Setenv("SUB2API_BACKGROUND_CONSUMERS", "")
 	called := false
 	err := BeginProcessWork(func() error {
 		called = true
 		return nil
 	})
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "DATABASE_HOST")
+	require.Contains(t, err.Error(), "SUB2API_BACKGROUND_CONSUMERS")
 	require.False(t, called)
 }

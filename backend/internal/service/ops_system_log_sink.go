@@ -114,6 +114,9 @@ func normalizeSystemLogHost(host string, err error) string {
 }
 
 func (s *OpsSystemLogSink) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil || s.opsRepo == nil {
 		return
 	}

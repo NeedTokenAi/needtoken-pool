@@ -56,6 +56,9 @@ func NewClaudeCodeVersionSyncService(
 }
 
 func (s *ClaudeCodeVersionSyncService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil || s.settingRepo == nil || s.githubClient == nil || s.interval <= 0 {
 		return
 	}

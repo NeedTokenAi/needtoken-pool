@@ -200,6 +200,9 @@ func (s *TokenRefreshService) notifyAccountSchedulingBlockCleared(accountID int6
 
 // Start 启动后台刷新服务
 func (s *TokenRefreshService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s.cfg == nil || !s.cfg.Enabled {
 		slog.Info("token_refresh.service_disabled")
 		return

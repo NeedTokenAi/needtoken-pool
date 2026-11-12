@@ -41,6 +41,15 @@ export const SECRET_BINDING_NAMES = [
 
 export const REGISTRY_IMAGE_REF = /^registry\.cloudflare\.com\/[a-z0-9][a-z0-9-]{0,62}\/[a-z0-9][a-z0-9._/-]{0,126}@sha256:[0-9a-f]{64}$/;
 
+// Staging may use only this Neon endpoint and its pooler host.
+// After cutover the live service keeps the existing production database.
+// Every other DATABASE_HOST is rejected. Redis is not host-checked.
+// The production DSN is not stored here.
+export const ALLOWED_DATABASE_HOSTS = [
+  "ep-aged-sunset-b33os2qw.c-4.ap-southeast-1.aws.neon.tech",
+  "ep-aged-sunset-b33os2qw-pooler.c-4.ap-southeast-1.aws.neon.tech",
+];
+
 const TEST_PERMITS = new Set([
   "isolated",
   "test",
@@ -52,44 +61,23 @@ const TEST_PERMITS = new Set([
   "staging",
 ]);
 
-export function parseAllowlist(raw) {
-  if (typeof raw !== "string") {
-    throw new Error("isolated allowlist must be injected host names");
+// REDIS_KEY_PREFIX is accepted only as the unused literal "staging:".
+// The Go Redis client has no key prefix, so this value does not rename queues.
+export function assertBackgroundConsumersOff(env = {}) {
+  if (env.REDIS_KEY_PREFIX != null && env.REDIS_KEY_PREFIX !== "" && env.REDIS_KEY_PREFIX !== "staging:") {
+    throw new Error("REDIS_KEY_PREFIX is not applied; only an unused staging: value is accepted");
   }
-  const text = raw.trim();
-  if (text === "" || text.startsWith("{") || text.startsWith("[")) {
-    throw new Error("hand-filled JSON is not an isolated allowlist");
-  }
-  const hosts = text.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
-  if (hosts.length === 0) {
-    throw new Error("isolated allowlist is empty");
-  }
-  for (const host of hosts) {
-    if (host.includes("/") || host.includes(" ") || host.includes("@") || host.includes(":")) {
-      throw new Error("isolated allowlist entries must be host names");
-    }
-  }
-  return hosts;
-}
-
-export function assertExactHost(name, host, allow) {
-  const value = typeof host === "string" ? host.trim().toLowerCase() : "";
-  if (!value || !allow.includes(value)) {
-    throw new Error(`${name} is not on the isolated allowlist`);
+  if (env.SUB2API_BACKGROUND_CONSUMERS !== "off") {
+    throw new Error("background consumers must be off while redis keys are shared");
   }
 }
 
 export function assertIsolatedHosts(env = {}) {
-  assertExactHost(
-    "DATABASE_HOST",
-    env.DATABASE_HOST,
-    parseAllowlist(env.POOL_ISOLATED_DATABASE_HOSTS),
-  );
-  assertExactHost(
-    "REDIS_HOST",
-    env.REDIS_HOST,
-    parseAllowlist(env.POOL_ISOLATED_REDIS_HOSTS),
-  );
+  const host = typeof env.DATABASE_HOST === "string" ? env.DATABASE_HOST.trim().toLowerCase() : "";
+  if (!ALLOWED_DATABASE_HOSTS.includes(host)) {
+    throw new Error("DATABASE_HOST is not on the staging allowlist");
+  }
+  assertBackgroundConsumersOff(env);
 }
 
 function nonTestPermit(permit) {
@@ -113,11 +101,13 @@ export function containerEnv(bindings = {}) {
     SKIP_SETUP: "true",
     SUB2API_ISOLATION: "isolated",
     SUB2API_WRITER_PERMIT: bindings.SUB2API_WRITER_PERMIT.trim(),
-    POOL_ISOLATED_DATABASE_HOSTS: bindings.POOL_ISOLATED_DATABASE_HOSTS,
-    POOL_ISOLATED_REDIS_HOSTS: bindings.POOL_ISOLATED_REDIS_HOSTS,
+    SUB2API_BACKGROUND_CONSUMERS: "off",
     DATABASE_HOST: bindings.DATABASE_HOST,
     REDIS_HOST: bindings.REDIS_HOST,
   };
+  if (bindings.REDIS_KEY_PREFIX === "staging:") {
+    env.REDIS_KEY_PREFIX = "staging:";
+  }
   for (const name of SECRET_BINDING_NAMES) {
     if (!Object.prototype.hasOwnProperty.call(bindings, name)) {
       continue;
@@ -148,6 +138,7 @@ export function isolatedPermit(env = {}) {
     lost: false,
     released: false,
     stopsOldProduction: false,
+    redisKeyPrefixApplied: false,
   };
 }
 

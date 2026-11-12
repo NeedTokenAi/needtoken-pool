@@ -50,6 +50,9 @@ func NewAuditLogService(repo AuditLogRepository, settingService *SettingService)
 
 // Start 启动异步写入与保留期清理协程。
 func (s *AuditLogService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil || s.repo == nil {
 		return
 	}

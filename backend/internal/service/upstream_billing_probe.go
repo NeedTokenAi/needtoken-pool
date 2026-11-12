@@ -307,6 +307,9 @@ func ProvideUpstreamBillingProbeService(
 }
 
 func (s *UpstreamBillingProbeService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil {
 		return
 	}

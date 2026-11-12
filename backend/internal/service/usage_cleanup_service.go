@@ -81,6 +81,9 @@ func describeUsageCleanupFilters(filters UsageCleanupFilters) string {
 }
 
 func (s *UsageCleanupService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil {
 		return
 	}

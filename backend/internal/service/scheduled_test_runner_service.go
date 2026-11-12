@@ -44,6 +44,9 @@ func NewScheduledTestRunnerService(
 
 // Start begins the cron ticker (every minute).
 func (s *ScheduledTestRunnerService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil {
 		return
 	}

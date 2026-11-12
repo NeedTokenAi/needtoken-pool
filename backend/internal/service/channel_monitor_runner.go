@@ -115,6 +115,9 @@ func newChannelMonitorRunner(svc monitorRunnerSvc, settingService *SettingServic
 // Start 加载所有 enabled monitor 并为每个建立独立定时任务。
 // 调用方需保证只调一次（wire ProvideChannelMonitorRunner 内只调一次）。
 func (r *ChannelMonitorRunner) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if r == nil || r.svc == nil {
 		return
 	}

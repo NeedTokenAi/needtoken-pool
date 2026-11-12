@@ -88,6 +88,9 @@ func NewOpsMetricsCollector(
 }
 
 func (c *OpsMetricsCollector) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if c == nil {
 		return
 	}

@@ -637,6 +637,9 @@ func NewGeminiCachedContentService(repo GeminiCachedContentRepository, compat *G
 
 // Start 启动后台回滚恢复：定期处理租约已过期仍未清除的修改意图。
 func (s *GeminiCachedContentService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil || s.repo == nil {
 		return
 	}

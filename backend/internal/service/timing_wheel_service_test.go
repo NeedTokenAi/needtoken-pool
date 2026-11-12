@@ -179,3 +179,15 @@ func TestTimingWheelService_ScheduleRecurring_ExecutesMultipleTimes(t *testing.T
 		t.Fatalf("期望周期任务至少执行 2 次，但只执行了 %d 次", atomic.LoadInt32(&count))
 	}
 }
+
+func TestTimingWheelScheduleSkippedWhenConsumersOff(t *testing.T) {
+	t.Setenv("SUB2API_BACKGROUND_CONSUMERS", "off")
+	svc := &TimingWheelService{}
+	defer func() {
+		if recover() != nil {
+			t.Fatal("schedule touched the timing wheel while consumers are off")
+		}
+	}()
+	svc.Schedule("job", time.Second, func() {})
+	svc.ScheduleRecurring("job", time.Second, func() {})
+}

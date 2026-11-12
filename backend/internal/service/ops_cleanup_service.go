@@ -90,6 +90,9 @@ func NewOpsCleanupService(
 // Start 首次启动 cron 调度。Enabled / Schedule 由 effective 配置决定（settings 优先 cfg）。
 // 重复调用幂等。
 func (s *OpsCleanupService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil {
 		return
 	}

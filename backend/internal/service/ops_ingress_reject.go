@@ -126,6 +126,9 @@ func NewOpsIngressRejectAggregator(repo OpsIngressRejectRepository) *OpsIngressR
 }
 
 func (a *OpsIngressRejectAggregator) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if a == nil || a.repo == nil || !a.started.CompareAndSwap(false, true) {
 		return
 	}

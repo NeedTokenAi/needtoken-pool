@@ -21,6 +21,9 @@ func NewProxyExpiryService(proxyRepo ProxyRepository, interval time.Duration) *P
 }
 
 func (s *ProxyExpiryService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil || s.proxyRepo == nil || s.interval <= 0 {
 		return
 	}

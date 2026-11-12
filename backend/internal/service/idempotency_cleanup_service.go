@@ -40,6 +40,9 @@ func NewIdempotencyCleanupService(repo IdempotencyRepository, cfg *config.Config
 }
 
 func (s *IdempotencyCleanupService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil || s.repo == nil {
 		return
 	}

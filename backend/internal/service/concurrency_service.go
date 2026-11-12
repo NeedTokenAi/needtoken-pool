@@ -722,7 +722,7 @@ func (s *ConcurrencyService) CleanupExpiredAccountSlots(ctx context.Context, acc
 
 // StartSlotCleanupWorker starts a background cleanup worker for expired account slots.
 func (s *ConcurrencyService) StartSlotCleanupWorker(_ AccountRepository, interval time.Duration) {
-	if s == nil || s.cache == nil || interval <= 0 {
+	if BackgroundConsumersSuppressed() || s == nil || s.cache == nil || interval <= 0 {
 		return
 	}
 

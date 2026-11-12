@@ -135,6 +135,9 @@ func (s *BatchImageCleanupService) RunOnce(ctx context.Context, now time.Time) (
 }
 
 func (s *BatchImageCleanupService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil || s.Repo == nil || s.Config == nil || !s.Config.BatchImage.Enabled || s.cleanupInterval() <= 0 {
 		return
 	}

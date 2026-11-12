@@ -447,6 +447,9 @@ func ProvideOllamaCloudUsageService(
 }
 
 func (s *OllamaCloudUsageService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil {
 		return
 	}

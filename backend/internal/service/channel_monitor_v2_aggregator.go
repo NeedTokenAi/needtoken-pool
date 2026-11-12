@@ -81,6 +81,9 @@ func NewChannelMonitorV2Aggregator(repo ChannelMonitorV2Repository, db *sql.DB, 
 }
 
 func (s *ChannelMonitorV2Aggregator) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil || s.repo == nil {
 		return
 	}

@@ -93,6 +93,9 @@ func (s *DashboardAggregationService) SetLeaderLock(lockCache LeaderLockCache, d
 
 // Start 启动定时聚合作业（重启生效配置）。
 func (s *DashboardAggregationService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil || s.repo == nil || s.timingWheel == nil {
 		return
 	}

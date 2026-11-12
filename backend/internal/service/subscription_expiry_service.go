@@ -72,6 +72,9 @@ func (s *SubscriptionExpiryService) SetNotificationEmailService(notificationEmai
 }
 
 func (s *SubscriptionExpiryService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil || s.userSubRepo == nil || s.interval <= 0 {
 		return
 	}

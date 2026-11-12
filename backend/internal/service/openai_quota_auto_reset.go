@@ -133,6 +133,9 @@ func NewOpenAIQuotaAutoResetService(
 }
 
 func (s *OpenAIQuotaAutoResetService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil || s.accountRepo == nil || s.quota == nil || s.idempotency == nil {
 		return
 	}

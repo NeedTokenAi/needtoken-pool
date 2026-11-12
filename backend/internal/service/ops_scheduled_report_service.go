@@ -90,6 +90,9 @@ func NewOpsScheduledReportService(
 }
 
 func (s *OpsScheduledReportService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	s.StartWithContext(context.Background())
 }
 

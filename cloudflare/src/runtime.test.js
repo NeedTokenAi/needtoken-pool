@@ -34,10 +34,10 @@ function isolatedEnv(overrides = {}) {
   return {
     SUB2API_ISOLATION: "isolated",
     SUB2API_WRITER_PERMIT: "pool-writer-permit-fixture",
-    DATABASE_HOST: "isolated-pool-db.example",
-    REDIS_HOST: "isolated-pool-redis.example",
-    POOL_ISOLATED_DATABASE_HOSTS: "isolated-pool-db.example",
-    POOL_ISOLATED_REDIS_HOSTS: "isolated-pool-redis.example",
+    DATABASE_HOST: "ep-aged-sunset-b33os2qw.c-4.ap-southeast-1.aws.neon.tech",
+    REDIS_HOST: "existing-upstash.example",
+    SUB2API_BACKGROUND_CONSUMERS: "off",
+    REDIS_KEY_PREFIX: "staging:",
     POOL_BUILD_REPOSITORY: REPO,
     POOL_BUILD_SHA: SHA,
     POOL_BUILD_RUN_ID: RUN_ID,
@@ -486,7 +486,7 @@ test("two recorded digests are not a rollback", () => {
   assert.equal(LIMITS.rollbackPerformed, false);
 });
 
-test("formal openSession approval rejects a bare digest, hand-filled JSON, and a production host", () => {
+test("formal openSession approval rejects a bare digest, hand-filled JSON, and any other database host", () => {
   const env = isolatedEnv();
   const gate = sessionFromContainer({ container: { images: { pool: IMAGE } } }, env);
   assert.equal(gate.approved[0].digest, IMAGE);
@@ -512,7 +512,12 @@ test("formal openSession approval rejects a bare digest, hand-filled JSON, and a
     ),
     /does not equal ctx\.container\.images\.pool/,
   );
-  for (const host of ["prod-pool-db.example", "prod-pool-db.example-isolated", "prod-pool-db.exampleisolated"]) {
+  for (const host of [
+    "other-db.example",
+    "ep-aged-sunset-b33os2qw.c-4.ap-southeast-1.aws.neon.tech-isolated",
+    "ep-aged-sunset-b33os2qw.c-4.ap-southeast-1.aws.neon.techisolated",
+    "ep-aged-sunset-b33os2qw-pooler.c-4.ap-southeast-1.aws.neon.tech-isolated",
+  ]) {
     assert.throws(
       () => sessionFromContainer(
         { container: { images: { pool: IMAGE } } },
@@ -521,6 +526,24 @@ test("formal openSession approval rejects a bare digest, hand-filled JSON, and a
       /DATABASE_HOST/,
     );
   }
+  const shared = sessionFromContainer(
+    { container: { images: { pool: IMAGE } } },
+    isolatedEnv({
+      DATABASE_HOST: "ep-aged-sunset-b33os2qw-pooler.c-4.ap-southeast-1.aws.neon.tech",
+      REDIS_HOST: "shared-upstash.example",
+    }),
+  );
+  assert.equal(shared.permit.redisKeyPrefixApplied, false);
+  assert.equal(containerEnv(isolatedEnv()).SUB2API_BACKGROUND_CONSUMERS, "off");
+  assert.equal(containerEnv(isolatedEnv()).REDIS_KEY_PREFIX, "staging:");
+  assert.equal(containerEnv(isolatedEnv()).POOL_ISOLATED_REDIS_HOSTS, undefined);
+  assert.throws(
+    () => sessionFromContainer(
+      { container: { images: { pool: IMAGE } } },
+      isolatedEnv({ SUB2API_BACKGROUND_CONSUMERS: "on" }),
+    ),
+    /background consumers/,
+  );
 });
 
 test("candidate check ties the digest to its build source and does not deploy", () => {

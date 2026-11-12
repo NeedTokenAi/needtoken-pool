@@ -34,6 +34,9 @@ func NewTimingWheelService() (*TimingWheelService, error) {
 
 // Start starts the timing wheel
 func (s *TimingWheelService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	logger.LegacyPrintf("service.timing_wheel", "%s", "[TimingWheel] Started (auto-start by go-zero)")
 }
 
@@ -47,6 +50,9 @@ func (s *TimingWheelService) Stop() {
 
 // Schedule schedules a one-time task
 func (s *TimingWheelService) Schedule(name string, delay time.Duration, fn func()) {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if err := s.tw.SetTimer(name, fn, delay); err != nil {
 		logger.LegacyPrintf("service.timing_wheel", "[TimingWheel] SetTimer failed for %q: %v", name, err)
 	}
@@ -54,6 +60,9 @@ func (s *TimingWheelService) Schedule(name string, delay time.Duration, fn func(
 
 // ScheduleRecurring schedules a recurring task
 func (s *TimingWheelService) ScheduleRecurring(name string, interval time.Duration, fn func()) {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	var schedule func()
 	schedule = func() {
 		fn()

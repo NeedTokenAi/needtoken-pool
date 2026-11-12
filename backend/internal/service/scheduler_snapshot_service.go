@@ -169,6 +169,9 @@ func NewSchedulerSnapshotService(
 }
 
 func (s *SchedulerSnapshotService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil || s.cache == nil {
 		return
 	}

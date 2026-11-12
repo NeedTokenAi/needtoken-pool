@@ -192,18 +192,20 @@ func runMainServer() {
 	if config.CloudflareProfileEnabled() && (lease == nil || !lease.Held()) {
 		log.Fatalf("refusing to start background work without an isolated writer permit")
 	}
-	if app.PluginManager != nil {
-		if err := app.PluginManager.Start(context.Background()); err != nil {
-			log.Printf("Plugin manager started in degraded state: %v", err)
+	if strings.TrimSpace(os.Getenv("SUB2API_BACKGROUND_CONSUMERS")) != "off" {
+		if app.PluginManager != nil {
+			if err := app.PluginManager.Start(context.Background()); err != nil {
+				log.Printf("Plugin manager started in degraded state: %v", err)
+			}
 		}
-	}
-	if app.PromptAudit != nil {
-		if err := app.PromptAudit.Start(context.Background()); err != nil {
-			// Startup continues so unrelated APIs stay up. Fail-closed (unavailable)
-			// applies only when a persisted blocking policy was observed; without
-			// blocking intent, Prompt Audit stays ModeOff so the gateway remains
-			// usable and administrators can still disable the feature (#4560).
-			log.Printf("Prompt Audit started in degraded state: %v", err)
+		if app.PromptAudit != nil {
+			if err := app.PromptAudit.Start(context.Background()); err != nil {
+				// Startup continues so unrelated APIs stay up. Fail-closed (unavailable)
+				// applies only when a persisted blocking policy was observed; without
+				// blocking intent, Prompt Audit stays ModeOff so the gateway remains
+				// usable and administrators can still disable the feature (#4560).
+				log.Printf("Prompt Audit started in degraded state: %v", err)
+			}
 		}
 	}
 

@@ -2,7 +2,6 @@ package setup
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"strings"
 
@@ -21,10 +20,43 @@ func RequireIsolatedWriterPermit() error {
 	if !nonTestWriterPermit(os.Getenv("SUB2API_WRITER_PERMIT")) {
 		return errors.New("cloudflare candidate requires a non-test writer permit")
 	}
-	if err := requireExactHost("DATABASE_HOST", "POOL_ISOLATED_DATABASE_HOSTS"); err != nil {
+	if err := requireAllowedDatabaseHost(); err != nil {
 		return err
 	}
-	return requireExactHost("REDIS_HOST", "POOL_ISOLATED_REDIS_HOSTS")
+	return requireBackgroundConsumersOff()
+}
+
+// allowedDatabaseHosts is the staging Neon endpoint and its pooler host.
+// After cutover the live service keeps the existing production database.
+// Staging rejects every other DATABASE_HOST, so it cannot connect to that
+// database. Redis stays the existing Upstash and is not host-checked.
+// The production DSN is not stored here.
+var allowedDatabaseHosts = map[string]struct{}{
+	"ep-aged-sunset-b33os2qw.c-4.ap-southeast-1.aws.neon.tech":        {},
+	"ep-aged-sunset-b33os2qw-pooler.c-4.ap-southeast-1.aws.neon.tech": {},
+}
+
+func requireAllowedDatabaseHost() error {
+	host := strings.ToLower(strings.TrimSpace(os.Getenv("DATABASE_HOST")))
+	if _, ok := allowedDatabaseHosts[host]; !ok {
+		return errors.New("DATABASE_HOST is not on the staging allowlist")
+	}
+	return nil
+}
+
+// requireBackgroundConsumersOff stops this process from running the shared
+// Upstash queues and schedules. REDIS_KEY_PREFIX is not applied: the Redis
+// client has no key prefix, and queue names are fixed literals.
+func requireBackgroundConsumersOff() error {
+	if strings.TrimSpace(os.Getenv("SUB2API_BACKGROUND_CONSUMERS")) != "off" {
+		return errors.New("cloudflare profile requires SUB2API_BACKGROUND_CONSUMERS=off")
+	}
+	return nil
+}
+
+// RedisKeyPrefixApplied is false. Setting REDIS_KEY_PREFIX does not change keys.
+func RedisKeyPrefixApplied() bool {
+	return false
 }
 
 func nonTestWriterPermit(permit string) bool {
@@ -38,20 +70,6 @@ func nonTestWriterPermit(permit string) bool {
 	default:
 		return true
 	}
-}
-
-func requireExactHost(hostEnv, allowEnv string) error {
-	host := strings.ToLower(strings.TrimSpace(os.Getenv(hostEnv)))
-	raw := strings.TrimSpace(os.Getenv(allowEnv))
-	if host == "" || raw == "" || strings.HasPrefix(raw, "{") || strings.HasPrefix(raw, "[") {
-		return fmt.Errorf("%s is not on the isolated allowlist", hostEnv)
-	}
-	for item := range strings.SplitSeq(raw, ",") {
-		if strings.ToLower(strings.TrimSpace(item)) == host {
-			return nil
-		}
-	}
-	return fmt.Errorf("%s is not on the isolated allowlist", hostEnv)
 }
 
 // WriterLease is held by this process only. Losing it refuses new HTTP work,

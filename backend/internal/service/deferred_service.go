@@ -27,6 +27,9 @@ func NewDeferredService(accountRepo AccountRepository, timingWheel *TimingWheelS
 
 // Start starts the deferred service
 func (s *DeferredService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	s.timingWheel.ScheduleRecurring("deferred:last_used", s.interval, s.flushLastUsed)
 	log.Printf("[DeferredService] Started (interval: %v)", s.interval)
 }

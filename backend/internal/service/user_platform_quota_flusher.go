@@ -249,6 +249,9 @@ func (s *UserPlatformQuotaUsageFlusher) tick() {
 
 // Start 注册定时 tick。flusher_enabled=false 时直接返回，不注册定时器。
 func (s *UserPlatformQuotaUsageFlusher) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil || !s.enabled {
 		return
 	}

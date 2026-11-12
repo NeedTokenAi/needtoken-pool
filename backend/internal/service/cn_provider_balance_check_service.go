@@ -60,6 +60,9 @@ func NewCNProviderBalanceCheckService(
 }
 
 func (s *CNProviderBalanceCheckService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil || s.accountRepo == nil || s.balanceService == nil || s.cfg == nil {
 		return
 	}

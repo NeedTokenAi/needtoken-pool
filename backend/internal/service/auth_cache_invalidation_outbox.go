@@ -111,6 +111,9 @@ func NewAuthCacheInvalidationWorker(repo AuthCacheInvalidationOutboxRepository, 
 }
 
 func (w *AuthCacheInvalidationWorker) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if w == nil || w.repo == nil || w.cache == nil {
 		return
 	}

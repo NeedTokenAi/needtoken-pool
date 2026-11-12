@@ -25,6 +25,9 @@ func NewAccountExpiryService(accountRepo AccountRepository, interval time.Durati
 }
 
 func (s *AccountExpiryService) Start() {
+	if BackgroundConsumersSuppressed() {
+		return
+	}
 	if s == nil || s.accountRepo == nil || s.interval <= 0 {
 		return
 	}
