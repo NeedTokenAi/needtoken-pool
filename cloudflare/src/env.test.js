@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -55,9 +55,16 @@ test("production wrangler config has no public route", () => {
   assert.equal(Object.hasOwn(config.vars, "OPS_WRITES_ENABLED"), false);
   assert.equal(container.max_instances, 2);
   assert.equal(container.instance_type, "basic");
-  assert.equal(container.image.includes("Dockerfile"), false);
-  assert.equal(container.image.includes("needtoken-pool-staging"), false);
-  assert.match(container.image, /^registry\.cloudflare\.com\/ACCOUNT_ID\/needtoken-pool@sha256:DIGEST$/);
+  assert.equal(container.scheduling_policy, "default");
+  assert.equal(container.image, "../Dockerfile");
+  assert.equal(container.image_build_context, "..");
+  assert.deepEqual(container.constraints.regions, ["APAC"]);
+  assert.deepEqual(config.observability, {
+    enabled: true,
+    logs: { enabled: true },
+    head_sampling_rate: 1,
+  });
+  assert.deepEqual(Object.keys(config.vars).sort(), ["AUTO_SETUP", "PORT"]);
   assert.equal(text.includes("needtoken.ai"), false);
   assert.equal(text.includes("exports"), false);
   assert.equal(worker.includes('const RESIDENT_INSTANCE = "instance-0"'), true);
@@ -69,16 +76,15 @@ test("production wrangler config has no public route", () => {
   assert.equal(worker.includes("6 * 60 * 60 * 1000"), true);
 });
 
-test("image workflow records a production digest without an account id", () => {
-  const workflow = readFileSync(
-    join(root, "../.github/workflows/cloudflare-staging-image.yml"),
-    "utf8",
-  );
+test("deploy workflows do not build or ship a separate image", () => {
+  const workflows = join(root, "../.github/workflows");
+  assert.equal(existsSync(join(workflows, "cloudflare-staging-image.yml")), false);
+  assert.equal(existsSync(join(workflows, "backend-ci.yml")), true);
+  assert.equal(existsSync(join(workflows, "security-scan.yml")), true);
 
-  assert.match(workflow, /needtoken-pool:\$\{tag\}/);
-  assert.equal(workflow.includes("needtoken-pool-staging"), false);
-  assert.match(workflow, /actions\/upload-artifact@v7/);
-  assert.match(workflow, /image-record\.json/);
-  assert.equal(workflow.includes("workflow_dispatch"), true);
-  assert.equal(workflow.includes("pull_request:"), false);
+  const deployWorkflow = readdirSync(workflows)
+    .filter((name) => name.endsWith(".yml"))
+    .map((name) => readFileSync(join(workflows, name), "utf8"))
+    .find((text) => /gcloud|google-github-actions\/deploy-cloudrun|run\.googleapis\.com/.test(text));
+  assert.equal(deployWorkflow, undefined);
 });

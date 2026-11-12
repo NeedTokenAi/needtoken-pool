@@ -1,26 +1,38 @@
 {
   // Production worker. workers_dev is off and there is no custom domain.
   // A minute cron keeps instance-0 resident. No public route is required.
-  // image is a digest placeholder, not a Dockerfile. Deploy copies an existing
-  // needtoken-pool image. Replace ACCOUNT_ID and DIGEST from the image-record
-  // artifact. This file does not rebuild the app image.
+  // image is the repository Dockerfile. Deploy builds it. The build context
+  // is the repository root, which is where that Dockerfile copies sources.
+  // vars are only AUTO_SETUP and PORT. Neither is a credential.
   // Secrets stay in wrangler secret storage and are not listed here.
   "name": "needtoken-pool",
   "main": "src/index.js",
   "compatibility_date": "2026-11-12",
   "workers_dev": false,
   "preview_urls": false,
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true
+    },
+    "head_sampling_rate": 1
+  },
   "triggers": {
     "crons": ["* * * * *"]
   },
   "containers": [
     {
       "class_name": "PoolContainer",
-      "image": "registry.cloudflare.com/ACCOUNT_ID/needtoken-pool@sha256:DIGEST",
+      "image": "../Dockerfile",
+      "image_build_context": "..",
       "max_instances": 2,
+      "scheduling_policy": "default",
       // Default-policy custom sizes need at least 1 vCPU and 3 GiB per vCPU.
       // basic is the smallest named type at or above 512 MiB: 1/4 vCPU, 1 GiB.
-      "instance_type": "basic"
+      "instance_type": "basic",
+      "constraints": {
+        "regions": ["APAC"]
+      }
     }
   ],
   "durable_objects": {
