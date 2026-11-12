@@ -1,0 +1,39 @@
+{
+  // Production worker. Served on workers.dev. No custom domain.
+  // image is a digest placeholder, not a Dockerfile. Deploy copies an existing
+  // needtoken-pool image. Replace ACCOUNT_ID and DIGEST from the image-record
+  // artifact. This file does not rebuild the app image.
+  // Secrets stay in wrangler secret storage and are not listed here.
+  "name": "needtoken-pool",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-12",
+  "workers_dev": true,
+  "containers": [
+    {
+      "class_name": "PoolContainer",
+      "image": "registry.cloudflare.com/ACCOUNT_ID/needtoken-pool@sha256:DIGEST",
+      "max_instances": 2,
+      "instance_type": {
+        "vcpu": 1,
+        "memory_mib": 512
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "POOL",
+        "class_name": "PoolContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PoolContainer"]
+    }
+  ],
+  "vars": {
+    "AUTO_SETUP": "true"
+  }
+}
