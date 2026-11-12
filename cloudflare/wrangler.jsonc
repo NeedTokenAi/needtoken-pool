@@ -1,5 +1,6 @@
 {
-  // Production worker. Served on workers.dev. No custom domain.
+  // Production worker. workers_dev is off and there is no custom domain.
+  // A minute cron keeps instance-0 resident. No public route is required.
   // image is a digest placeholder, not a Dockerfile. Deploy copies an existing
   // needtoken-pool image. Replace ACCOUNT_ID and DIGEST from the image-record
   // artifact. This file does not rebuild the app image.
@@ -7,8 +8,11 @@
   "name": "needtoken-pool",
   "main": "src/index.js",
   "compatibility_date": "2026-11-12",
-  "workers_dev": true,
+  "workers_dev": false,
   "preview_urls": false,
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
   "containers": [
     {
       "class_name": "PoolContainer",

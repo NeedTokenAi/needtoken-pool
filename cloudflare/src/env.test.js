@@ -33,13 +33,15 @@ test("container env is copied unchanged and omits bindings", () => {
   assert.equal(Object.hasOwn(passed, "REDIS_KEY_PREFIX"), false);
 });
 
-test("production wrangler config stays on workers.dev", () => {
+test("production wrangler config has no public route", () => {
   const config = parseJsonc(readFileSync(join(root, "wrangler.jsonc"), "utf8"));
   const container = config.containers[0];
   const text = readFileSync(join(root, "wrangler.jsonc"), "utf8");
+  const worker = readFileSync(join(root, "src/index.js"), "utf8");
 
   assert.equal(config.name, "needtoken-pool");
-  assert.equal(config.workers_dev, true);
+  assert.equal(config.workers_dev, false);
+  assert.deepEqual(config.triggers.crons, ["* * * * *"]);
   assert.equal(config.routes, undefined);
   assert.equal(config.route, undefined);
   assert.equal(config.exports, undefined);
@@ -58,6 +60,13 @@ test("production wrangler config stays on workers.dev", () => {
   assert.match(container.image, /^registry\.cloudflare\.com\/ACCOUNT_ID\/needtoken-pool@sha256:DIGEST$/);
   assert.equal(text.includes("needtoken.ai"), false);
   assert.equal(text.includes("exports"), false);
+  assert.equal(worker.includes('const RESIDENT_INSTANCE = "instance-0"'), true);
+  assert.equal(worker.split("getByName(").length, 2);
+  assert.equal(worker.includes("getByName(RESIDENT_INSTANCE)"), true);
+  assert.equal(worker.includes("instance-1"), false);
+  assert.equal(worker.includes("Math.random"), false);
+  assert.equal(worker.includes("/health"), true);
+  assert.equal(worker.includes("6 * 60 * 60 * 1000"), true);
 });
 
 test("image workflow records a production digest without an account id", () => {
