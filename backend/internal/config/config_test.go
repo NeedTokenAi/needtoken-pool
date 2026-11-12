@@ -2755,3 +2755,94 @@ func TestLoadSimpleModeAutoCreateDefaultGroups(t *testing.T) {
 		})
 	}
 }
+
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	previous, ok := os.LookupEnv(key)
+	require.NoError(t, os.Unsetenv(key))
+	t.Cleanup(func() {
+		if ok {
+			require.NoError(t, os.Setenv(key, previous))
+			return
+		}
+		require.NoError(t, os.Unsetenv(key))
+	})
+}
+
+func TestCloudflareProfileRefusesToMintTotpKey(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	unsetEnvForTest(t, "JWT_SECRET")
+	unsetEnvForTest(t, "TOTP_ENCRYPTION_KEY")
+	t.Setenv("SUB2API_RUNTIME", "cloudflare")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("jwt:\n  secret: "+strings.Repeat("j", 32)+"\n"), 0o600))
+	t.Setenv("CONFIG_FILE", path)
+
+	called := false
+	previous := readSecretEntropy
+	readSecretEntropy = func([]byte) (int, error) {
+		called = true
+		return 0, fmt.Errorf("must not mint")
+	}
+	t.Cleanup(func() { readSecretEntropy = previous })
+
+	cfg, err := Load()
+	require.Error(t, err)
+	require.Nil(t, cfg)
+	require.False(t, called)
+	require.Contains(t, err.Error(), "refuses to generate a totp encryption key")
+}
+
+func TestCloudflareProfileKeepsInjectedTotpKey(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	unsetEnvForTest(t, "JWT_SECRET")
+	unsetEnvForTest(t, "TOTP_ENCRYPTION_KEY")
+	t.Setenv("SUB2API_RUNTIME", "cloudflare")
+	const totpKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := "jwt:\n  secret: " + strings.Repeat("j", 32) + "\ntotp:\n  encryption_key: " + totpKey + "\n"
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+	t.Setenv("CONFIG_FILE", path)
+
+	previous := readSecretEntropy
+	readSecretEntropy = func([]byte) (int, error) {
+		return 0, fmt.Errorf("must not mint")
+	}
+	t.Cleanup(func() { readSecretEntropy = previous })
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, totpKey, cfg.Totp.EncryptionKey)
+	require.True(t, cfg.Totp.EncryptionKeyConfigured)
+	require.Equal(t, strings.Repeat("j", 32), cfg.JWT.Secret)
+}
+
+func TestLoadStillMintsTotpKeyOutsideCloudflareProfile(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	unsetEnvForTest(t, "JWT_SECRET")
+	unsetEnvForTest(t, "TOTP_ENCRYPTION_KEY")
+	unsetEnvForTest(t, "SUB2API_RUNTIME")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("jwt:\n  secret: "+strings.Repeat("j", 32)+"\n"), 0o600))
+	t.Setenv("CONFIG_FILE", path)
+
+	called := false
+	previous := readSecretEntropy
+	readSecretEntropy = func(buf []byte) (int, error) {
+		called = true
+		for i := range buf {
+			buf[i] = 0xab
+		}
+		return len(buf), nil
+	}
+	t.Cleanup(func() { readSecretEntropy = previous })
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.True(t, called)
+	require.Equal(t, strings.Repeat("ab", 32), cfg.Totp.EncryptionKey)
+	require.False(t, cfg.Totp.EncryptionKeyConfigured)
+}

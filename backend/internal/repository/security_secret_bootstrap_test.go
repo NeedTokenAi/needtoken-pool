@@ -51,6 +51,7 @@ func TestEnsureBootstrapSecretsNilInputs(t *testing.T) {
 }
 
 func TestEnsureBootstrapSecretsGenerateAndPersistJWTSecret(t *testing.T) {
+	t.Setenv("SUB2API_RUNTIME", "")
 	client := newSecuritySecretTestClient(t)
 	cfg := &config.Config{}
 
@@ -62,6 +63,51 @@ func TestEnsureBootstrapSecretsGenerateAndPersistJWTSecret(t *testing.T) {
 	stored, err := client.SecuritySecret.Query().Where(securitysecret.KeyEQ(securitySecretKeyJWT)).Only(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, cfg.JWT.Secret, stored.Value)
+}
+
+func TestCloudflareProfileRefusesToMintJWT(t *testing.T) {
+	t.Setenv("SUB2API_RUNTIME", "cloudflare")
+	client := newSecuritySecretTestClient(t)
+	called := false
+	previous := readRandomBytes
+	readRandomBytes = func([]byte) (int, error) {
+		called = true
+		return 0, errors.New("must not mint")
+	}
+	t.Cleanup(func() { readRandomBytes = previous })
+
+	cfg := &config.Config{}
+	err := ensureBootstrapSecrets(context.Background(), client, cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "refuses to generate a jwt secret")
+	require.False(t, called)
+	require.Empty(t, cfg.JWT.Secret)
+
+	_, err = client.SecuritySecret.Query().Where(securitysecret.KeyEQ(securitySecretKeyJWT)).Only(context.Background())
+	require.True(t, dbent.IsNotFound(err))
+}
+
+func TestCloudflareProfilePersistsProvidedJWTWithoutMinting(t *testing.T) {
+	t.Setenv("SUB2API_RUNTIME", "cloudflare")
+	client := newSecuritySecretTestClient(t)
+	called := false
+	previous := readRandomBytes
+	readRandomBytes = func([]byte) (int, error) {
+		called = true
+		return 0, errors.New("must not mint")
+	}
+	t.Cleanup(func() { readRandomBytes = previous })
+
+	const jwtSecret = "injected-jwt-secret-32bytes-minimum"
+	cfg := &config.Config{JWT: config.JWTConfig{Secret: jwtSecret}}
+	err := ensureBootstrapSecrets(context.Background(), client, cfg)
+	require.NoError(t, err)
+	require.False(t, called)
+	require.Equal(t, jwtSecret, cfg.JWT.Secret)
+
+	stored, err := client.SecuritySecret.Query().Where(securitysecret.KeyEQ(securitySecretKeyJWT)).Only(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, jwtSecret, stored.Value)
 }
 
 func TestEnsureBootstrapSecretsLoadExistingJWTSecret(t *testing.T) {

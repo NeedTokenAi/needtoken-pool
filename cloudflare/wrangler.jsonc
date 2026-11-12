@@ -1,0 +1,45 @@
+{
+  // Phase-1 skeleton. This file is not a deploy manifest.
+  // durable_object is public beta. Instance caps are not set here.
+  // The deprecated scheduling policy is intentionally absent.
+  "name": "needtoken-pool",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-12",
+  "workers_dev": false,
+  "containers": [
+    {
+      "class_name": "PoolContainer",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "pool": {
+          "dockerfile": "../Dockerfile",
+          "build_context": ".."
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "POOL",
+        "class_name": "PoolContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "pool-container-sqlite",
+      "new_sqlite_classes": ["PoolContainer"]
+    }
+  ],
+  "exports": {
+    "PoolContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "vars": {
+    "SUB2API_RUNTIME": "cloudflare",
+    "SKIP_SETUP": "true"
+  }
+}

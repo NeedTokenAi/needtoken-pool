@@ -68,14 +68,24 @@ func main() {
 
 	// CLI setup mode
 	if *setupMode {
+		if config.CloudflareProfileEnabled() {
+			log.Fatalf("cloudflare profile refuses to run setup")
+		}
 		if err := setup.RunCLI(); err != nil {
 			log.Fatalf("Setup failed: %v", err)
 		}
 		return
 	}
 
+	if err := setup.PrepareProcessStart(); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
+
 	// Check if setup is needed
 	if setup.NeedsSetup() {
+		if config.CloudflareProfileEnabled() {
+			log.Fatalf("cloudflare profile refuses to enter setup")
+		}
 		// Check if auto-setup is enabled (for Docker deployment)
 		if setup.AutoSetupEnabled() {
 			log.Println("Auto setup mode enabled...")

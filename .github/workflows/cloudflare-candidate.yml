@@ -1,0 +1,43 @@
+name: Cloudflare candidate check
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      main_sha:
+        description: main commit SHA this candidate is bound to
+        required: true
+        type: string
+      image_digest:
+        description: sha256 digest of the pool image candidate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+      - name: Local skeleton tests
+        run: |
+          node --test cloudflare/src/runtime.test.js
+          node cloudflare/candidate-check.mjs --self-test
+          cd backend && go test -count=1 -timeout 180s -run 'Cloudflare|EnsureBootstrapSecrets' ./internal/config/ ./internal/setup/ ./internal/repository/
+      - name: Bind main SHA and digest
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git fetch origin main
+          node cloudflare/candidate-check.mjs --bind \
+            --main-sha "${{ inputs.main_sha }}" \
+            --digest "${{ inputs.image_digest }}" \
+            --origin-main "$(git rev-parse origin/main)"

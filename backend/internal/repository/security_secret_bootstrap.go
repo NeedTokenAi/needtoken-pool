@@ -33,6 +33,9 @@ func ensureBootstrapSecrets(ctx context.Context, client *ent.Client, cfg *config
 	}
 
 	cfg.JWT.Secret = strings.TrimSpace(cfg.JWT.Secret)
+	if cfg.JWT.Secret == "" && config.CloudflareProfileEnabled() {
+		return fmt.Errorf("cloudflare profile refuses to generate a jwt secret")
+	}
 	if cfg.JWT.Secret != "" {
 		storedSecret, err := createSecuritySecretIfAbsent(ctx, client, securitySecretKeyJWT, cfg.JWT.Secret)
 		if err != nil {

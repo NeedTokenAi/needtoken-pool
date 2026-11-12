@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"golang.org/x/term"
 )
 
@@ -41,6 +42,9 @@ func cliValidateSSLMode(mode string) bool {
 
 // RunCLI runs the CLI setup wizard
 func RunCLI() error {
+	if config.CloudflareProfileEnabled() {
+		return fmt.Errorf("cloudflare profile refuses to run setup")
+	}
 	reader := bufio.NewReader(os.Stdin)
 
 	fmt.Println()

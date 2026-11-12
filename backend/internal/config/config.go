@@ -2039,9 +2039,14 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 		cfg.Gateway.UserMessageQueue.Mode = ""
 	}
 
-	// Auto-generate TOTP encryption key if not set (32 bytes = 64 hex chars for AES-256)
+	// Auto-generate TOTP encryption key if not set (32 bytes = 64 hex chars for AES-256).
+	// The Cloudflare profile must never take this branch: an empty disk would mint a
+	// new secret-encryption key and make existing ciphertext undecryptable.
 	cfg.Totp.EncryptionKey = strings.TrimSpace(cfg.Totp.EncryptionKey)
 	if cfg.Totp.EncryptionKey == "" {
+		if CloudflareProfileEnabled() {
+			return nil, fmt.Errorf("cloudflare profile refuses to generate a totp encryption key")
+		}
 		key, err := generateJWTSecret(32) // Reuse the same random generation function
 		if err != nil {
 			return nil, fmt.Errorf("generate totp encryption key error: %w", err)
@@ -3919,12 +3924,17 @@ func isWeakJWTSecret(secret string) bool {
 	return exists
 }
 
+// readSecretEntropy is the only randomness used when a non-Cloudflare process
+// mints a TOTP encryption key. Tests replace it to prove the Cloudflare profile
+// never reads it. The default remains crypto/rand.
+var readSecretEntropy = rand.Read
+
 func generateJWTSecret(byteLength int) (string, error) {
 	if byteLength <= 0 {
 		byteLength = 32
 	}
 	buf := make([]byte, byteLength)
-	if _, err := rand.Read(buf); err != nil {
+	if _, err := readSecretEntropy(buf); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(buf), nil

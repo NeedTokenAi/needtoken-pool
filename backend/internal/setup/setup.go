@@ -312,6 +312,9 @@ func TestRedisConnection(cfg *RedisConfig) error {
 
 // Install performs the installation with the given configuration
 func Install(cfg *SetupConfig) error {
+	if config.CloudflareProfileEnabled() {
+		return fmt.Errorf("cloudflare profile refuses to run setup")
+	}
 	// Security check: prevent re-installation if already installed
 	if !NeedsSetup() {
 		return fmt.Errorf("system is already installed, re-installation is not allowed")
@@ -615,6 +618,9 @@ func getEnvIntOrDefault(key string, defaultValue int) int {
 // AutoSetupFromEnv performs automatic setup using environment variables
 // This is designed for Docker deployment where all config is passed via env vars
 func AutoSetupFromEnv() error {
+	if config.CloudflareProfileEnabled() {
+		return fmt.Errorf("cloudflare profile refuses to run setup")
+	}
 	logger.LegacyPrintf("setup", "%s", "Auto setup enabled, configuring from environment variables...")
 	logger.LegacyPrintf("setup", "Data directory: %s", GetDataDir())
 
