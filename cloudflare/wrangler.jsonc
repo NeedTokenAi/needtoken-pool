@@ -8,15 +8,15 @@
   "main": "src/index.js",
   "compatibility_date": "2026-11-12",
   "workers_dev": true,
+  "preview_urls": false,
   "containers": [
     {
       "class_name": "PoolContainer",
       "image": "registry.cloudflare.com/ACCOUNT_ID/needtoken-pool@sha256:DIGEST",
       "max_instances": 2,
-      "instance_type": {
-        "vcpu": 1,
-        "memory_mib": 512
-      }
+      // Default-policy custom sizes need at least 1 vCPU and 3 GiB per vCPU.
+      // 512 MiB is not legal there. lite is the smallest named instance type.
+      "instance_type": "lite"
     }
   ],
   "durable_objects": {
@@ -34,6 +34,7 @@
     }
   ],
   "vars": {
-    "AUTO_SETUP": "true"
+    "AUTO_SETUP": "true",
+    "PORT": "8080"
   }
 }
