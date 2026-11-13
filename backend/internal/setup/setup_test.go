@@ -259,15 +259,14 @@ func TestRebuiltDataDirDropsConfigLockAndLog(t *testing.T) {
 }
 
 func stripJSONC(text string) string {
-	var b strings.Builder
+	lines := make([]string, 0)
 	for line := range strings.SplitSeq(text, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "//") {
 			continue
 		}
-		b.WriteString(line)
-		b.WriteByte('\n')
+		lines = append(lines, line)
 	}
-	return b.String()
+	return strings.Join(lines, "\n")
 }
 
 func TestSetupMigrationTimeout(t *testing.T) {
