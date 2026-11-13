@@ -3,15 +3,18 @@ package setup
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin/binding"
 	"github.com/lib/pq"
@@ -177,6 +180,94 @@ func TestNeedsSetupFallsBackToFileDetectionWhenSkipSetupIsDisabled(t *testing.T)
 			}
 		})
 	}
+}
+
+func TestRebuiltDataDirDropsConfigLockAndLog(t *testing.T) {
+	t.Setenv("SKIP_SETUP", "")
+
+	installed := t.TempDir()
+	for _, rel := range []string{ConfigFileName, InstallLockFile} {
+		if err := os.WriteFile(filepath.Join(installed, rel), []byte("local\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", rel, err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(installed, "logs"), 0o700); err != nil {
+		t.Fatalf("MkdirAll(logs) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(installed, "logs", "sub2api.log"), []byte("log\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(log) error = %v", err)
+	}
+
+	t.Setenv("DATA_DIR", installed)
+	if NeedsSetup() {
+		t.Fatal("NeedsSetup() = true, want false while config.yaml is present")
+	}
+
+	rebuilt := t.TempDir()
+	t.Setenv("DATA_DIR", rebuilt)
+	if !NeedsSetup() {
+		t.Fatal("NeedsSetup() = false, want true on a fresh data directory")
+	}
+	for _, rel := range []string{ConfigFileName, InstallLockFile, filepath.Join("logs", "sub2api.log")} {
+		if _, err := os.Stat(filepath.Join(rebuilt, rel)); !os.IsNotExist(err) {
+			t.Fatalf("%s present after rebuild: %v", rel, err)
+		}
+	}
+	if logger.DefaultContainerLogPath != "/app/data/logs/sub2api.log" {
+		t.Fatalf("default log path = %q", logger.DefaultContainerLogPath)
+	}
+
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+	wrangler, err := os.ReadFile(filepath.Join(root, "cloudflare", "wrangler.jsonc"))
+	if err != nil {
+		t.Fatalf("ReadFile(wrangler.jsonc) error = %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(stripJSONC(string(wrangler))), &cfg); err != nil {
+		t.Fatalf("parse wrangler.jsonc: %v", err)
+	}
+	if _, ok := cfg["volumes"]; ok {
+		t.Fatal("wrangler.jsonc declares volumes")
+	}
+	containers, _ := cfg["containers"].([]any)
+	if len(containers) != 1 {
+		t.Fatalf("containers = %d, want 1", len(containers))
+	}
+	container, _ := containers[0].(map[string]any)
+	if _, ok := container["volumes"]; ok {
+		t.Fatal("container declares volumes")
+	}
+	if container["image"] != "../Dockerfile" {
+		t.Fatalf("container image = %v", container["image"])
+	}
+	dockerfile, err := os.ReadFile(filepath.Join(root, "Dockerfile"))
+	if err != nil {
+		t.Fatalf("ReadFile(Dockerfile) error = %v", err)
+	}
+	if !strings.Contains(string(dockerfile), "mkdir -p /app/data") {
+		t.Fatal("Dockerfile does not create /app/data in the image")
+	}
+	for _, line := range strings.Split(string(dockerfile), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "VOLUME") {
+			t.Fatalf("Dockerfile persists a volume: %s", strings.TrimSpace(line))
+		}
+	}
+}
+
+func stripJSONC(text string) string {
+	var b strings.Builder
+	for line := range strings.SplitSeq(text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 func TestSetupMigrationTimeout(t *testing.T) {
