@@ -3,7 +3,10 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -119,6 +122,32 @@ func TestMigrateOpenAIAllowClaudeCodeCodexPluginSetting(t *testing.T) {
 		_, wrote := repo.sets[SettingKeyCodexCLIOnlyWhitelist]
 		require.False(t, wrote)
 	})
+
+	t.Run("legacy false does not write the whitelist", func(t *testing.T) {
+		repo := &codexPolicyMigrationRepoStub{values: map[string]string{
+			SettingKeyOpenAIAllowClaudeCodeCodexPlugin: "false",
+			SettingKeyCodexCLIOnlyWhitelist:            `[{"originator":"opencode","ua_contains":["opencode/"]}]`,
+		}}
+		svc := NewSettingService(repo, &config.Config{})
+
+		require.NoError(t, svc.MigrateOpenAIAllowClaudeCodeCodexPluginSetting(context.Background()))
+
+		_, wrote := repo.sets[SettingKeyCodexCLIOnlyWhitelist]
+		require.False(t, wrote)
+		require.Equal(t, `[{"originator":"opencode","ua_contains":["opencode/"]}]`, repo.values[SettingKeyCodexCLIOnlyWhitelist])
+	})
+
+	t.Run("missing legacy flag does not write the whitelist", func(t *testing.T) {
+		repo := &codexPolicyMigrationRepoStub{values: map[string]string{
+			SettingKeyCodexCLIOnlyWhitelist: `[{"originator":"opencode","ua_contains":["opencode/"]}]`,
+		}}
+		svc := NewSettingService(repo, &config.Config{})
+
+		require.NoError(t, svc.MigrateOpenAIAllowClaudeCodeCodexPluginSetting(context.Background()))
+
+		_, wrote := repo.sets[SettingKeyCodexCLIOnlyWhitelist]
+		require.False(t, wrote)
+	})
 }
 
 func TestGetCodexRestrictionPolicy_AllowAppServerClients(t *testing.T) {
@@ -201,6 +230,21 @@ func TestMigrateCodexBodyFingerprintToSignals(t *testing.T) {
 		require.NoError(t, svc.MigrateCodexBodyFingerprintToSignals(context.Background()))
 		require.Equal(t, openai.DefaultEngineFingerprintSignalsJSON(), repo.values[SettingKeyCodexCLIOnlyEngineFingerprintSignals])
 	})
+}
+
+func TestStartupWiresTheThreeSettingMigrations(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	wire, err := os.ReadFile(filepath.Join(filepath.Dir(file), "wire.go"))
+	require.NoError(t, err)
+	text := string(wire)
+	for _, name := range []string{
+		"MigrateOpenAIAllowClaudeCodeCodexPluginSetting",
+		"MigrateCodexBodyFingerprintToSignals",
+		"MigrateGrokDefaultTextModel",
+	} {
+		require.Contains(t, text, "svc."+name+"(")
+	}
 }
 
 func TestMigrateGrokDefaultTextModel(t *testing.T) {
