@@ -1,0 +1,75 @@
+# 仅在受信任的 main 分支运行：当上游同步 PR 的 CI 与 Security Scan 全部通过且未命中高危路径时，
+# 以普通 Merge Commit 自动合入 main，触发 Cloudflare Workers Builds 自动构建。
+name: auto-merge-upstream
+
+on:
+  workflow_run:
+    workflows: ["CI", "Security Scan"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      head_branch:
+        description: "上游同步分支名（sync/upstream/<40位sha>）"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-merge-upstream-${{ github.event.workflow_run.head_branch || inputs.head_branch || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  auto-merge:
+    name: Auto-merge upstream sync PR
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'sync/upstream/'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      checks: read
+      contents: write
+      issues: write
+      pull-requests: write
+      statuses: read
+    steps:
+      - name: Choose token
+        id: auth
+        env:
+          SYNC_GITHUB_TOKEN: ${{ secrets.SYNC_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -n ${SYNC_GITHUB_TOKEN} ]]; then
+            echo "mode=pat" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=github_token" >> "$GITHUB_OUTPUT"
+            echo "::warning::SYNC_GITHUB_TOKEN 未配置，将使用 GITHUB_TOKEN 合并（Cloudflare Workers Builds 仍会被 push webhook 触发，但 main 上的 GitHub Actions push 工作流不会级联触发）。"
+          fi
+
+      - name: Checkout trusted main scripts only
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+          sparse-checkout: |
+            .github/upstream-sync
+
+      - name: Evaluate risk gate and auto-merge via Merge Commit
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.mode == 'pat' && secrets.SYNC_GITHUB_TOKEN || github.token }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || inputs.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          UPSTREAM_AUTO_MERGE: ${{ vars.UPSTREAM_AUTO_MERGE || 'true' }}
+          UPSTREAM_AUTO_MERGE_MAX_FILES: ${{ vars.UPSTREAM_AUTO_MERGE_MAX_FILES || '300' }}
+          REQUIRED_CHECKS: |
+            shell
+            test
+            frontend
+            golangci-lint
+            release-helpers
+            backend-security
+            frontend-security
+        run: bash .github/upstream-sync/auto-merge-upstream.sh

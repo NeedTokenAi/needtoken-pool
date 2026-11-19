@@ -1,0 +1,56 @@
+# 每天 00:30 UTC（北京时间 08:30）把上游 Wei-Shaw/sub2api 的固定稳定版提交开成 PR。
+# 默认仅跟踪 stable-tags（vMAJOR.MINOR.PATCH），最低版本底线 v0.2.20。
+# 没有 id-token，不接触生产云凭证。不要改成 pull_request_target。
+name: sync-upstream
+
+on:
+  schedule:
+    - cron: '30 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync upstream
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: write
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Choose token
+        id: auth
+        env:
+          SYNC_GITHUB_TOKEN: ${{ secrets.SYNC_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -n ${SYNC_GITHUB_TOKEN} ]]; then
+            echo "mode=pat" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=github_token" >> "$GITHUB_OUTPUT"
+            echo "::warning::SYNC_GITHUB_TOKEN 未配置。默认 GITHUB_TOKEN 开出的 PR 不会触发 pull_request CI，请在仓库 Secrets 中配置 SYNC_GITHUB_TOKEN。"
+          fi
+
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+          token: ${{ steps.auth.outputs.mode == 'pat' && secrets.SYNC_GITHUB_TOKEN || github.token }}
+
+      - name: Open upstream sync PR
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.mode == 'pat' && secrets.SYNC_GITHUB_TOKEN || github.token }}
+          SYNC_AUTH_MODE: ${{ steps.auth.outputs.mode }}
+          UPSTREAM_CHANNEL: ${{ vars.UPSTREAM_CHANNEL || 'stable-tags' }}
+          UPSTREAM_MIN_TAG: ${{ vars.UPSTREAM_MIN_TAG || 'v0.2.20' }}
+          UPSTREAM_REPO: Wei-Shaw/sub2api
+          UPSTREAM_AUTO_MERGE_MAX_FILES: ${{ vars.UPSTREAM_AUTO_MERGE_MAX_FILES || '300' }}
+          CI_SUMMARY_TEXT: CI（shell / test / frontend / golangci-lint / release-helpers）与 Security Scan（backend-security / frontend-security）
+        run: .github/upstream-sync/sync-upstream.sh
