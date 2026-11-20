@@ -1,9 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 import { containerEnv } from "./env.js";
 import {
+  HEALTH_PROBE_MS,
   READY_INTERVAL_MS,
   READY_WAIT_MS,
+  dispatchReady,
   notReadyResponse,
+  probeHealth,
   waitForReady,
 } from "./ready.js";
 
@@ -26,8 +29,10 @@ function resident(env) {
   return env.POOL.getByName(RESIDENT_INSTANCE);
 }
 
-async function healthReady(container) {
-  const response = await container.getTcpPort(APP_PORT).fetch("http://container/health");
+async function healthReady(container, signal) {
+  const response = await container.getTcpPort(APP_PORT).fetch("http://container/health", {
+    signal,
+  });
   const ready = response.ok;
   await response.body?.cancel();
   return ready;
@@ -45,31 +50,36 @@ export class PoolContainer extends DurableObject {
     }
   }
 
-  async ensureStarted() {
-    const container = this.ctx.container;
-    if (!container.running) {
-      container.start({
-        env: containerEnv(this.env),
-        enableInternet: true,
-      });
-    }
-    await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
-    return container;
-  }
-
   async fetch(request) {
+    const container = this.ctx.container;
     try {
-      const container = await this.ensureStarted();
-      if (!this.healthy) {
-        if (!(await healthReady(container))) return notReadyResponse();
-        this.healthy = true;
+      if (!container.running) {
+        this.healthy = false;
+        container.start({
+          env: containerEnv(this.env),
+          enableInternet: true,
+        });
       }
-      return await container.getTcpPort(APP_PORT).fetch(forwardedRequest(request));
+      await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
     } catch (error) {
       this.healthy = false;
-      console.error("container is not ready", error);
+      console.error("container did not start", error);
       return notReadyResponse();
     }
+
+    // 503 is only for this probe. The client request is forwarded after it.
+    return dispatchReady(
+      async () => {
+        if (this.healthy) return true;
+        const ready = await probeHealth(
+          (signal) => healthReady(container, signal),
+          HEALTH_PROBE_MS,
+        );
+        if (ready) this.healthy = true;
+        return ready;
+      },
+      () => container.getTcpPort(APP_PORT).fetch(forwardedRequest(request)),
+    );
   }
 }
 

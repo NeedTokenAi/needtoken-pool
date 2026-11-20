@@ -1,5 +1,6 @@
 export const READY_WAIT_MS = 210_000;
 export const READY_INTERVAL_MS = 1_000;
+export const HEALTH_PROBE_MS = 5_000;
 export const RETRY_AFTER_SECONDS = 15;
 
 export function notReadyResponse() {
@@ -27,4 +28,21 @@ export async function waitForReady(probe, wait, deadlineMs, intervalMs) {
     if (Date.now() + intervalMs > deadline) return null;
     await wait(intervalMs);
   }
+}
+
+// fetchHealth receives an abort signal. A timeout, a closed port, or a
+// non-ok probe means the client request has not been sent yet.
+export async function probeHealth(fetchHealth, timeoutMs = HEALTH_PROBE_MS) {
+  try {
+    const signal = AbortSignal.timeout(timeoutMs);
+    return Boolean(await fetchHealth(signal));
+  } catch {
+    return false;
+  }
+}
+
+// forward() is the client request. Its result or error is not replaced with 503.
+export async function dispatchReady(ready, forward) {
+  if (!(await ready())) return notReadyResponse();
+  return forward();
 }
