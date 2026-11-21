@@ -1,10 +1,13 @@
 package service
 
 import (
+	"context"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -128,18 +131,18 @@ func TestOpenAIResponsesOrphanPrecheckCompatibilityErrors(t *testing.T) {
 }
 
 func TestOpenAIResponsesOrphanPrecheckLargeEscapedContent(t *testing.T) {
-	// AllocsPerRun reads process-wide mallocs. go test runs packages in
-	// parallel, and a preempted measurement then counts another package's
-	// allocations. CI saw 30 and then 18 for the same input. Re-exec this
-	// test alone so the count belongs to this function.
-	if os.Getenv("SUB2API_ORPHAN_PRECHECK_ALLOC") != "1" {
-		//nolint:gosec // G702: 只重新执行当前测试二进制，参数是固定的 -test.run，不是外部输入
-		cmd := exec.Command(os.Args[0], "-test.run=^TestOpenAIResponsesOrphanPrecheckLargeEscapedContent$", "-test.count=1", "-test.v")
-		cmd.Env = append(os.Environ(), "SUB2API_ORPHAN_PRECHECK_ALLOC=1")
-		out, err := cmd.CombinedOutput()
-		if err != nil || !strings.Contains(string(out), "--- PASS: TestOpenAIResponsesOrphanPrecheckLargeEscapedContent") {
-			t.Fatalf("allocation check in an isolated process failed: %v\n%s", err, out)
-		}
+	// AllocsPerRun counts allocations across the process, including background
+	// goroutines left by other service tests. Measure only this case in a child.
+	const childEnv = "SUB2API_OPENAI_ORPHAN_ALLOC_TEST_CHILD"
+	if os.Getenv(childEnv) != "1" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		executable, err := os.Executable()
+		require.NoError(t, err)
+		cmd := exec.CommandContext(ctx, executable, "-test.run=^"+regexp.QuoteMeta(t.Name())+"$", "-test.count=1")
+		cmd.Env = append(os.Environ(), childEnv+"=1")
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "isolated allocation test failed:\n%s", output)
 		return
 	}
 
