@@ -225,14 +225,16 @@ export function parseAiReviewJson(rawText, fallback) {
 
 export async function callAiGateway({
   gatewayUrl,
-  apiKey,
+  apiKey = "",
   cfAigToken = "",
-  model = "xai/grok-3-mini",
+  model = "google-ai-studio/gemini-2.5-flash",
   promptContext,
   fallback,
   fetchImpl = fetch,
 }) {
-  if (!gatewayUrl || !apiKey) {
+  // Support both Cloudflare AI Gateway BYOK/Stored Keys (cfAigToken only, omitting
+  // Authorization so Cloudflare injects the stored provider key) and explicit provider keys.
+  if (!gatewayUrl || (!apiKey && !cfAigToken)) {
     return { ...fallback, ai_status: "not_configured", ai_model: "" };
   }
   const systemPrompt = [
@@ -244,8 +246,10 @@ export async function callAiGateway({
 
   const headers = {
     "content-type": "application/json",
-    authorization: `Bearer ${apiKey}`,
   };
+  if (apiKey) {
+    headers.authorization = `Bearer ${apiKey}`;
+  }
   if (cfAigToken) {
     headers["cf-aig-authorization"] = `Bearer ${cfAigToken}`;
   }
@@ -503,7 +507,7 @@ async function runCli() {
           gatewayUrl: (process.env.AI_GATEWAY_URL || "").trim(),
           apiKey: (process.env.AI_GATEWAY_API_KEY || "").trim(),
           cfAigToken: (process.env.CF_AIG_TOKEN || "").trim(),
-          model: (process.env.AI_REVIEW_MODEL || "xai/grok-3-mini").trim(),
+          model: (process.env.AI_REVIEW_MODEL || "google-ai-studio/gemini-2.5-flash").trim(),
           promptContext,
           fallback: staticAssessment,
         });

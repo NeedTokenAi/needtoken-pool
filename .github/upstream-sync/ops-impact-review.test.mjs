@@ -91,6 +91,22 @@ test("Cloudflare AI Gateway call sends cf-aig-authorization and gracefully falls
   assert.equal(capturedHeaders.authorization, "Bearer xai-test-key");
   assert.equal(reviewed.verdict, "caution");
   assert.equal(reviewed.summary_zh, "需关注商品接口变更");
+
+  // Cloudflare AI Gateway BYOK / Stored Keys mode: cfAigToken only, MUST omit Authorization header.
+  capturedHeaders = undefined;
+  const byokReviewed = await callAiGateway({
+    gatewayUrl: "https://gateway.ai.cloudflare.com/v1/acct/needtoken-ci/compat/chat/completions",
+    apiKey: "",
+    cfAigToken: "cf-aig-stored-key-token",
+    model: "google-ai-studio/gemini-2.5-flash",
+    promptContext: "diff",
+    fallback,
+    fetchImpl: mockFetch,
+  });
+  assert.equal(capturedHeaders["cf-aig-authorization"], "Bearer cf-aig-stored-key-token");
+  assert.equal(Object.hasOwn(capturedHeaders, "authorization"), false);
+  assert.equal(byokReviewed.ai_status, "completed");
+  assert.equal(byokReviewed.verdict, "caution");
 });
 
 test("signs Ops release webhook with HMAC-SHA256 and renders PR markdown with marker", async () => {
