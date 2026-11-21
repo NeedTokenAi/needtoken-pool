@@ -1,0 +1,117 @@
+# 评估 PR 对 NeedToken Ops 后台、Glue 号池契约、边缘门禁与数据库迁移的影响，
+# 并通过 Cloudflare AI Gateway 调用指定模型输出中文研判报告与推送 Ops 通知。
+name: ops-impact-check
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ops-impact:
+    name: Ops impact & AI risk review
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+          cache: true
+
+      - name: Run edge gate and Ops route contract smoke tests
+        id: contracts
+        run: |
+          set +e
+          node --test cloudflare/src/*.test.js .github/upstream-sync/ops-impact-review.test.mjs
+          node_rc=$?
+          (cd backend && go test ./internal/server/routes -run "TestChatGPTInspection|TestCustomAdminKey" -count=1 -timeout=120s)
+          go_rc=$?
+          set -e
+          if [[ $node_rc -eq 0 && $go_rc -eq 0 ]]; then
+            echo "status=passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Scan high-risk paths & run Cloudflare AI Gateway review
+        if: always()
+        env:
+          NEEDTOKEN_MODULE: pool
+          UPSTREAM_REPO: Wei-Shaw/sub2api
+          AI_GATEWAY_URL: ${{ vars.AI_GATEWAY_URL || secrets.AI_GATEWAY_URL }}
+          AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
+          CF_AIG_TOKEN: ${{ secrets.CF_AIG_TOKEN }}
+          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL || 'xai/grok-3-mini' }}
+          OPS_RELEASE_WEBHOOK_URL: ${{ vars.OPS_RELEASE_WEBHOOK_URL || secrets.OPS_RELEASE_WEBHOOK_URL }}
+          OPS_RELEASE_WEBHOOK_SECRET: ${{ secrets.OPS_RELEASE_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          base_sha="${{ github.event.pull_request.base.sha || '' }}"
+          head_sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          if [[ -z $base_sha ]]; then
+            base_sha=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)
+          fi
+          source .github/upstream-sync/lib/high-risk-paths.sh
+          git diff --name-only "$base_sha" "$head_sha" | filter_high_risk_paths > high-risk.txt || true
+          tag_hint="${{ github.event.pull_request.title || '' }}"
+          tag=$(printf '%s' "$tag_hint" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?' | tail -n 1 || true)
+          node .github/upstream-sync/ops-impact-review.mjs \
+            --mode pr \
+            --module pool \
+            --repo "${{ github.repository }}" \
+            --upstream-repo Wei-Shaw/sub2api \
+            --tag "$tag" \
+            --base-sha "$base_sha" \
+            --head-sha "$head_sha" \
+            --pr-number "${{ github.event.pull_request.number || 0 }}" \
+            --pr-url "${{ github.event.pull_request.html_url || '' }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --high-risk-file high-risk.txt \
+            --contract-status "${{ steps.contracts.outputs.status || 'failed' }}" \
+            --out-json ops-impact-report.json \
+            --out-md ops-impact-comment.md
+          cat ops-impact-comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upsert PR impact comment
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [[ -f ops-impact-comment.md ]] || exit 0
+          existing_id=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments?per_page=100" \
+            --jq '.[] | select(.body | contains("<!-- needtoken-ops-impact-report -->")) | .id' | tail -n 1 || true)
+          if [[ -n $existing_id ]]; then
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/${existing_id}" -F body=@ops-impact-comment.md >/dev/null
+          else
+            gh api -X POST "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" -F body=@ops-impact-comment.md >/dev/null
+          fi
+
+      - name: Upload ops impact report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ops-impact-report
+          path: ops-impact-report.json
+          if-no-files-found: ignore
+          retention-days: 30

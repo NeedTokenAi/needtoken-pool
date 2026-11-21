@@ -62,7 +62,7 @@ jobs:
           GH_TOKEN: ${{ steps.auth.outputs.mode == 'pat' && secrets.SYNC_GITHUB_TOKEN || github.token }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || inputs.head_branch }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          UPSTREAM_AUTO_MERGE: ${{ vars.UPSTREAM_AUTO_MERGE || 'true' }}
+          UPSTREAM_AUTO_MERGE: ${{ vars.UPSTREAM_AUTO_MERGE || 'false' }}
           UPSTREAM_AUTO_MERGE_MAX_FILES: ${{ vars.UPSTREAM_AUTO_MERGE_MAX_FILES || '300' }}
           REQUIRED_CHECKS: |
             shell
