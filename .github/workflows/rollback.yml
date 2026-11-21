@@ -1,0 +1,105 @@
+# 安全回退流水线：通过 git revert 生成回退 PR 合入 main，严禁 force-push。
+name: rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      bad_merge_sha:
+        description: "需要回退的 main 提交或合并提交 40 位 SHA"
+        required: true
+        type: string
+      reason:
+        description: "回退原因（写入 PR 描述与提交记录）"
+        required: true
+        type: string
+      skip_tag:
+        description: "可选：需要加入坏版本跳过名单的上游 tag（如 v1.5.4）"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  create-rollback-pr:
+    name: Create safe revert PR
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Choose token
+        id: auth
+        env:
+          SYNC_GITHUB_TOKEN: ${{ secrets.SYNC_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -n ${SYNC_GITHUB_TOKEN} ]]; then
+            echo "mode=pat" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=github_token" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+          token: ${{ steps.auth.outputs.mode == 'pat' && secrets.SYNC_GITHUB_TOKEN || github.token }}
+
+      - name: Create revert branch and open PR
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.mode == 'pat' && secrets.SYNC_GITHUB_TOKEN || github.token }}
+          BAD_SHA: ${{ inputs.bad_merge_sha }}
+          REASON: ${{ inputs.reason }}
+          SKIP_TAG: ${{ inputs.skip_tag }}
+        run: |
+          set -euo pipefail
+          [[ $BAD_SHA =~ ^[0-9a-f]{40}$ ]] || {
+            echo "bad_merge_sha must be a 40-char lowercase hex SHA" >&2
+            exit 1
+          }
+          git cat-file -e "${BAD_SHA}^{commit}"
+          git merge-base --is-ancestor "$BAD_SHA" origin/main || {
+            echo "${BAD_SHA} is not an ancestor of origin/main" >&2
+            exit 1
+          }
+
+          short_sha=${BAD_SHA:0:10}
+          branch="rollback/${short_sha}-$(date -u +%Y%m%d%H%M%S)"
+          git checkout --no-track -B "$branch" origin/main
+
+          export GIT_AUTHOR_NAME='github-actions[bot]'
+          export GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
+          export GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME
+          export GIT_COMMITTER_EMAIL=$GIT_COMMITTER_EMAIL
+
+          parent_count=$(git rev-list --parents -n 1 "$BAD_SHA" | awk '{print NF-1}')
+          if [[ $parent_count -ge 2 ]]; then
+            git revert -m 1 --no-edit "$BAD_SHA"
+          else
+            git revert --no-edit "$BAD_SHA"
+          fi
+
+          git push origin "refs/heads/${branch}:refs/heads/${branch}"
+
+          body=$(mktemp)
+          cat >"$body" <<EOF
+          ## 安全回退 PR（严禁 force-push）
+
+          - 回退提交：\`${BAD_SHA}\`（父提交数：${parent_count}）
+          - 回退原因：${REASON}
+          - 建议跳过上游版本：\`${SKIP_TAG:-无}\`
+
+          > ⚠️ 若本次被回退的提交包含数据库结构迁移（\`destructive_irreversible\`），请先确认数据库状态兼容旧版代码后再合并本 PR。
+          > 合并本 PR 至 \`main\` 后将由 Cloudflare Workers Builds 自动重新构建并发布。
+          EOF
+          url=$(gh pr create --repo "${{ github.repository }}" --base main --head "$branch" \
+            --title "revert: rollback ${short_sha} (${SKIP_TAG:-hotfix})" \
+            --body-file "$body")
+          rm -f "$body"
+          printf 'Opened rollback PR: %s\n' "$url"
+          printf '### 安全回退 PR 已创建\n\n- PR: %s\n- 回退提交: `%s`\n' "$url" "$BAD_SHA" >> "$GITHUB_STEP_SUMMARY"

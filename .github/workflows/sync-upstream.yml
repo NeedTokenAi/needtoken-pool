@@ -1,12 +1,20 @@
-# 每天 00:30 UTC（北京时间 08:30）把上游 Wei-Shaw/sub2api 的固定稳定版提交开成 PR。
-# 默认仅跟踪 stable-tags（vMAJOR.MINOR.PATCH），最低版本底线 v0.2.20。
-# 没有 id-token，不接触生产云凭证。不要改成 pull_request_target。
+# 每天 00:30 UTC（北京时间 08:30）检测上游 Wei-Shaw/sub2api 最新稳定版并开 PR（默认仅通知 Ops，不静默自动升级）。
+# 也支持通过 workflow_dispatch 指定 target_tag 或 skip_tags。
 name: sync-upstream
 
 on:
   schedule:
     - cron: '30 0 * * *'
   workflow_dispatch:
+    inputs:
+      target_tag:
+        description: "可选：手动指定同步的目标上游 tag（如 v0.2.24），留空则按稳定版通道自动选最新版"
+        required: false
+        type: string
+      skip_tags:
+        description: "可选：逗号分隔的跳过版本名单（覆盖/追加 UPSTREAM_SKIP_TAGS）"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -33,8 +41,13 @@ jobs:
             echo "mode=pat" >> "$GITHUB_OUTPUT"
           else
             echo "mode=github_token" >> "$GITHUB_OUTPUT"
-            echo "::warning::SYNC_GITHUB_TOKEN 未配置。默认 GITHUB_TOKEN 开出的 PR 不会触发 pull_request CI，请在仓库 Secrets 中配置 SYNC_GITHUB_TOKEN。"
+            echo "::warning::SYNC_GITHUB_TOKEN 未配置。默认 GITHUB_TOKEN 开出的 PR 不会触发 pull_request CI。"
           fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
       - name: Checkout main
         uses: actions/checkout@v4
@@ -44,13 +57,31 @@ jobs:
           persist-credentials: true
           token: ${{ steps.auth.outputs.mode == 'pat' && secrets.SYNC_GITHUB_TOKEN || github.token }}
 
-      - name: Open upstream sync PR
+      - name: Open upstream sync PR or emit conflict report
         env:
           GH_TOKEN: ${{ steps.auth.outputs.mode == 'pat' && secrets.SYNC_GITHUB_TOKEN || github.token }}
+          NEEDTOKEN_MODULE: pool
           SYNC_AUTH_MODE: ${{ steps.auth.outputs.mode }}
           UPSTREAM_CHANNEL: ${{ vars.UPSTREAM_CHANNEL || 'stable-tags' }}
           UPSTREAM_MIN_TAG: ${{ vars.UPSTREAM_MIN_TAG || 'v0.2.20' }}
+          UPSTREAM_TARGET_TAG: ${{ inputs.target_tag }}
+          UPSTREAM_SKIP_TAGS: ${{ inputs.skip_tags || vars.UPSTREAM_SKIP_TAGS }}
           UPSTREAM_REPO: Wei-Shaw/sub2api
           UPSTREAM_AUTO_MERGE_MAX_FILES: ${{ vars.UPSTREAM_AUTO_MERGE_MAX_FILES || '300' }}
-          CI_SUMMARY_TEXT: CI（shell / test / frontend / golangci-lint / release-helpers）与 Security Scan（backend-security / frontend-security）
+          CI_SUMMARY_TEXT: CI（shell / test / frontend / golangci-lint / release-helpers）、Security Scan 与 ops-impact-check
+          AI_GATEWAY_URL: ${{ vars.AI_GATEWAY_URL || secrets.AI_GATEWAY_URL }}
+          AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
+          CF_AIG_TOKEN: ${{ secrets.CF_AIG_TOKEN }}
+          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL || 'google-ai-studio/gemini-2.5-flash' }}
+          OPS_RELEASE_WEBHOOK_URL: ${{ vars.OPS_RELEASE_WEBHOOK_URL || secrets.OPS_RELEASE_WEBHOOK_URL }}
+          OPS_RELEASE_WEBHOOK_SECRET: ${{ secrets.OPS_RELEASE_WEBHOOK_SECRET }}
         run: .github/upstream-sync/sync-upstream.sh
+
+      - name: Upload sync report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-sync-report
+          path: upstream-sync-report.json
+          if-no-files-found: ignore
+          retention-days: 14

@@ -34,7 +34,10 @@ for p in \
   "backend/internal/config/config.go" \
   "backend/internal/service/proxy_probe.go" \
   "backend/internal/service/subscription_service.go" \
-  "backend/internal/handler/auth_handler.go"; do
+  "backend/internal/handler/auth_handler.go" \
+  "backend/internal/server/routes/admin.go" \
+  "backend/internal/service/openai_responses_orphan_precheck_test.go" \
+  "backend/cmd/server/VERSION"; do
   is_high_risk_path "$p" || fail "expected high-risk: $p"
 done
 

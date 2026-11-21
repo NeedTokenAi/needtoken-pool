@@ -29,6 +29,12 @@ is_high_risk_path() {
       backend/internal/service/*proxy*)
       return 0
       ;;
+    # NeedToken 二开保护区（Ops/Glue 契约路由、版本文件与定制单测）
+    backend/internal/server/routes/admin.go | backend/internal/server/routes/gateway.go | \
+      backend/internal/handler/admin/ops* | backend/internal/service/openai_responses_orphan_precheck_test.go | \
+      backend/cmd/server/VERSION)
+      return 0
+      ;;
     *)
       return 1
       ;;
