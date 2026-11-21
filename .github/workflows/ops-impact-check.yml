@@ -60,7 +60,8 @@ jobs:
           AI_GATEWAY_URL: ${{ vars.AI_GATEWAY_URL || secrets.AI_GATEWAY_URL }}
           AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
           CF_AIG_TOKEN: ${{ secrets.CF_AIG_TOKEN }}
-          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL || 'google-ai-studio/gemini-2.5-flash' }}
+          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL || 'google-ai-studio/gemini-4-neon' }}
+          AI_REVIEW_FALLBACK_MODELS: ${{ vars.AI_REVIEW_FALLBACK_MODELS }}
           OPS_RELEASE_WEBHOOK_URL: ${{ vars.OPS_RELEASE_WEBHOOK_URL || secrets.OPS_RELEASE_WEBHOOK_URL }}
           OPS_RELEASE_WEBHOOK_SECRET: ${{ secrets.OPS_RELEASE_WEBHOOK_SECRET }}
         run: |

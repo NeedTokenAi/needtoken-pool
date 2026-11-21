@@ -223,11 +223,55 @@ export function parseAiReviewJson(rawText, fallback) {
   };
 }
 
+const DEFAULT_GOOGLE_FALLBACK_MODELS = [
+  "google-ai-studio/gemini-4-carbon",
+  "google-ai-studio/gemini-3.5-flash-lite",
+];
+
+function sanitizeDiagnosticDetail(raw) {
+  if (!raw || typeof raw !== "string") return "";
+  return raw
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]")
+    .replace(/\b(sk-|AIza|ghp_|github_pat_)[A-Za-z0-9_-]+/g, "[REDACTED]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
+}
+
+function buildCandidateModels(primaryModel, fallbackModels = "") {
+  const candidates = [];
+  const pushUnique = (item) => {
+    const trimmed = String(item || "").trim();
+    if (trimmed && !candidates.includes(trimmed)) {
+      candidates.push(trimmed);
+    }
+  };
+  pushUnique(primaryModel);
+  const explicit = Array.isArray(fallbackModels)
+    ? fallbackModels
+    : String(fallbackModels || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+  for (const item of explicit) {
+    pushUnique(item);
+  }
+  if (explicit.length === 0 && String(primaryModel || "").startsWith("google-ai-studio/")) {
+    for (const item of DEFAULT_GOOGLE_FALLBACK_MODELS) {
+      pushUnique(item);
+    }
+  }
+  return candidates;
+}
+
 export async function callAiGateway({
   gatewayUrl,
   apiKey = "",
   cfAigToken = "",
-  model = "google-ai-studio/gemini-2.5-flash",
+  model = "google-ai-studio/gemini-4-neon",
+  fallbackModels = "",
+  timeoutMs = 120_000,
+  sleepMs = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)),
   promptContext,
   fallback,
   fetchImpl = fetch,
@@ -254,9 +298,9 @@ export async function callAiGateway({
     headers["cf-aig-authorization"] = `Bearer ${cfAigToken}`;
   }
 
-  const send = async (withResponseFormat) => {
+  const send = async (candidateModel, withResponseFormat) => {
     const body = {
-      model,
+      model: candidateModel,
       temperature: 0.1,
       messages: [
         { role: "system", content: systemPrompt },
@@ -270,25 +314,76 @@ export async function callAiGateway({
       method: "POST",
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(45_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   };
 
-  try {
-    let response = await send(true);
-    if (response.status === 400) {
-      response = await send(false);
+  const candidates = buildCandidateModels(model, fallbackModels);
+  let lastStatus = "unknown";
+  let lastModel = model;
+  let lastDetail = "";
+
+  for (const candidateModel of candidates) {
+    lastModel = candidateModel;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        let response = await send(candidateModel, true);
+        if (response.status === 400) {
+          response = await send(candidateModel, false);
+        }
+        if (response.ok) {
+          const data = await response.json();
+          const content = data?.choices?.[0]?.message?.content ?? "";
+          const merged = parseAiReviewJson(content, fallback);
+          return { ...merged, ai_model: candidateModel };
+        }
+
+        lastStatus = `gateway_http_${response.status}`;
+        try {
+          lastDetail = sanitizeDiagnosticDetail(await response.text());
+        } catch {
+          lastDetail = "";
+        }
+        console.error(
+          `[ops-impact-review] AI Gateway HTTP ${response.status} on ${candidateModel} (attempt ${attempt + 1}): ${lastDetail || "empty body"}`,
+        );
+
+        const retryable = [429, 502, 503, 504].includes(response.status);
+        if (retryable && attempt === 0) {
+          await sleepMs(2_000);
+          continue;
+        }
+        const canFallbackNextModel = [404, 429, 502, 503, 504].includes(response.status);
+        if (!canFallbackNextModel) {
+          return {
+            ...fallback,
+            ai_status: lastStatus,
+            ai_model: candidateModel,
+            ...(lastDetail ? { ai_error_detail: lastDetail } : {}),
+          };
+        }
+        break;
+      } catch (err) {
+        lastStatus = `gateway_error:${err?.name || "unknown"}`;
+        lastDetail = sanitizeDiagnosticDetail(err?.message || "");
+        console.error(
+          `[ops-impact-review] AI Gateway error on ${candidateModel} (attempt ${attempt + 1}): ${lastStatus} ${lastDetail}`,
+        );
+        if (attempt === 0) {
+          await sleepMs(1_500);
+          continue;
+        }
+        break;
+      }
     }
-    if (!response.ok) {
-      return { ...fallback, ai_status: `gateway_http_${response.status}`, ai_model: model };
-    }
-    const data = await response.json();
-    const content = data?.choices?.[0]?.message?.content ?? "";
-    const merged = parseAiReviewJson(content, fallback);
-    return { ...merged, ai_model: model };
-  } catch (err) {
-    return { ...fallback, ai_status: `gateway_error:${err?.name || "unknown"}`, ai_model: model };
   }
+
+  return {
+    ...fallback,
+    ai_status: lastStatus,
+    ai_model: lastModel,
+    ...(lastDetail ? { ai_error_detail: lastDetail } : {}),
+  };
 }
 
 export function signWebhookPayload(secret, timestampSec, rawBody) {
@@ -357,6 +452,7 @@ export function renderPrCommentMarkdown(report) {
     `- **数据库迁移风险**：${dbBadge}`,
     `- **契约/门禁检查**：\`${report.contract_check_status || "unknown"}\``,
     `- **AI 研判引擎**：\`${report.ai_status}\`${report.ai_model ? `（\`${report.ai_model}\`）` : ""}`,
+    ...(report.ai_error_detail ? [`- **AI 网关诊断**：\`${report.ai_error_detail.replace(/`/g, "'")}\``] : []),
     "",
     `#### 中文结论`,
     report.summary_zh,
@@ -507,7 +603,8 @@ async function runCli() {
           gatewayUrl: (process.env.AI_GATEWAY_URL || "").trim(),
           apiKey: (process.env.AI_GATEWAY_API_KEY || "").trim(),
           cfAigToken: (process.env.CF_AIG_TOKEN || "").trim(),
-          model: (process.env.AI_REVIEW_MODEL || "google-ai-studio/gemini-2.5-flash").trim(),
+          model: (process.env.AI_REVIEW_MODEL || "google-ai-studio/gemini-4-neon").trim(),
+          fallbackModels: (process.env.AI_REVIEW_FALLBACK_MODELS || "").trim(),
           promptContext,
           fallback: staticAssessment,
         });

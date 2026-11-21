@@ -143,3 +143,66 @@ test("signs Ops release webhook with HMAC-SHA256 and renders PR markdown with ma
   assert.equal(md.startsWith(COMMENT_MARKER), true);
   assert.equal(md.includes("Create a merge commit"), true);
 });
+
+test("retries 429 and falls back to secondary Gemini model or records redacted diagnostic detail", async () => {
+  const fallback = buildStaticImpactAssessment({ moduleName: "pool", files: ["README.md"] });
+  const triedModels = [];
+  const recovered = await callAiGateway({
+    gatewayUrl: "https://gateway.ai.cloudflare.com/v1/acct/needtoken-ci/compat/chat/completions",
+    cfAigToken: "cf-aig-stored-key-token",
+    model: "google-ai-studio/gemini-4-neon",
+    sleepMs: async () => {},
+    promptContext: "diff",
+    fallback,
+    fetchImpl: async (_url, init) => {
+      const parsed = JSON.parse(init.body);
+      triedModels.push(parsed.model);
+      if (parsed.model === "google-ai-studio/gemini-4-neon") {
+        return new Response('{"error":{"code":429,"message":"RESOURCE_EXHAUSTED"}}', { status: 429 });
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  verdict: "safe",
+                  summary_zh: "备用模型成功完成研判",
+                  ops_impact: "无影响",
+                  db_migration_risk: "none",
+                  db_migration_notes: "无迁移",
+                  attention_files: [],
+                  recommendation_zh: "可安全合并",
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    },
+  });
+  assert.deepEqual(triedModels, [
+    "google-ai-studio/gemini-4-neon",
+    "google-ai-studio/gemini-4-neon",
+    "google-ai-studio/gemini-4-carbon",
+  ]);
+  assert.equal(recovered.ai_status, "completed");
+  assert.equal(recovered.ai_model, "google-ai-studio/gemini-4-carbon");
+  assert.equal(recovered.summary_zh, "备用模型成功完成研判");
+
+  const exhausted = await callAiGateway({
+    gatewayUrl: "https://gateway.ai.cloudflare.com/v1/acct/needtoken-ci/compat/chat/completions",
+    cfAigToken: "cf-aig-stored-key-token",
+    model: "google-ai-studio/gemini-4-neon",
+    fallbackModels: ["google-ai-studio/gemini-4-carbon"],
+    sleepMs: async () => {},
+    promptContext: "diff",
+    fallback,
+    fetchImpl: async () =>
+      new Response('{"error":{"message":"Quota exceeded for AIzaSySecretKey123456"}}', { status: 429 }),
+  });
+  assert.equal(exhausted.ai_status, "gateway_http_429");
+  assert.equal(exhausted.ai_error_detail.includes("AIzaSySecretKey123456"), false);
+  assert.equal(exhausted.ai_error_detail.includes("[REDACTED]"), true);
+});
