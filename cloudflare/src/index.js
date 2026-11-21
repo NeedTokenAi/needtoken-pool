@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { handleEdgeAdminGate, stripEdgeGateHeaders } from "./admin_gate.js";
 import { containerEnv } from "./env.js";
 import {
   READY_INTERVAL_MS,
@@ -19,6 +20,7 @@ export function forwardedRequest(request) {
   url.host = "container";
   const forwarded = new Request(url, request);
   forwarded.headers.delete("host");
+  stripEdgeGateHeaders(forwarded.headers);
   return forwarded;
 }
 
@@ -58,6 +60,8 @@ export class PoolContainer extends DurableObject {
   }
 
   async fetch(request) {
+    const gate = await handleEdgeAdminGate(request, this.env, this.ctx.storage?.sql);
+    if (gate.response) return gate.response;
     try {
       const container = await this.ensureStarted();
       if (!this.healthy) {
