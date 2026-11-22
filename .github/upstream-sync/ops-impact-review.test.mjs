@@ -6,9 +6,11 @@ import {
   buildStaticImpactAssessment,
   callAiGateway,
   classifyDbMigrationRisk,
+  classifyReleasePRKind,
   parseAiReviewJson,
   postOpsWebhook,
   renderPrCommentMarkdown,
+  shouldNotifyOpsWebhook,
   signWebhookPayload,
 } from "./ops-impact-review.mjs";
 
@@ -205,4 +207,15 @@ test("retries 429 and falls back to secondary Gemini model or records redacted d
   assert.equal(exhausted.ai_status, "gateway_http_429");
   assert.equal(exhausted.ai_error_detail.includes("AIzaSySecretKey123456"), false);
   assert.equal(exhausted.ai_error_detail.includes("[REDACTED]"), true);
+});
+
+test("only dispatches Ops release governance webhook for upstream sync and rollback PRs", () => {
+  assert.equal(classifyReleasePRKind("sync/upstream/abcdef", "pr"), "upstream_sync");
+  assert.equal(classifyReleasePRKind("rollback/bad-merge", "pr"), "rollback");
+  assert.equal(classifyReleasePRKind("feat/custom-work", "pr"), "internal");
+  assert.equal(classifyReleasePRKind("feat/custom-work", "conflict"), "upstream_sync");
+  assert.equal(shouldNotifyOpsWebhook({ mode: "pr", headRef: "sync/upstream/1234" }), true);
+  assert.equal(shouldNotifyOpsWebhook({ mode: "pr", headRef: "rollback/1234" }), true);
+  assert.equal(shouldNotifyOpsWebhook({ mode: "pr", headRef: "feat/local-feature" }), false);
+  assert.equal(shouldNotifyOpsWebhook({ mode: "pr", headRef: "sync/upstream/1234", skipWebhook: true }), false);
 });
