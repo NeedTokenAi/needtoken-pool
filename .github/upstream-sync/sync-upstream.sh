@@ -121,7 +121,7 @@ branch="sync/upstream/${upstream_sha}"
 export GIT_AUTHOR_NAME='github-actions[bot]'
 export GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
 export GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME
-export GIT_COMMITTER_EMAIL=$GIT_COMMITTER_EMAIL
+export GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
 
 report_conflict() {
   local files=$1 merge_log_file=$2
