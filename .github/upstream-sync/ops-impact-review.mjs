@@ -505,6 +505,20 @@ function buildCompactDiff(baseRef, headRef, focusFiles) {
   return raw.slice(0, 22_000);
 }
 
+export function classifyReleasePRKind(headRef, mode = "pr") {
+  if (mode === "conflict" || mode === "opened") return "upstream_sync";
+  const ref = String(headRef || "").trim();
+  if (ref.startsWith("sync/upstream/")) return "upstream_sync";
+  if (ref.startsWith("rollback/")) return "rollback";
+  return "internal";
+}
+
+export function shouldNotifyOpsWebhook({ mode = "pr", headRef = "", skipWebhook = false } = {}) {
+  if (skipWebhook) return false;
+  const kind = classifyReleasePRKind(headRef, mode);
+  return kind === "upstream_sync" || kind === "rollback";
+}
+
 async function runCli() {
   const args = parseArgs(process.argv.slice(2));
   const mode = args.mode || "pr";
@@ -514,6 +528,9 @@ async function runCli() {
   const tag = args.tag || process.env.UPSTREAM_TAG || "";
   const baseSha = args["base-sha"] || process.env.BASE_SHA || "";
   const headSha = args["head-sha"] || process.env.HEAD_SHA || "";
+  const headRef = args["head-ref"] || process.env.HEAD_REF || "";
+  const prKind = classifyReleasePRKind(headRef, mode);
+  const skipWebhook = args["skip-webhook"] === "true";
   const prNumber = args["pr-number"] ? Number(args["pr-number"]) : Number(process.env.PR_NUMBER || 0);
   const prUrl = args["pr-url"] || process.env.PR_URL || "";
   const runUrl = args["run-url"] || process.env.RUN_URL || "";
@@ -618,6 +635,8 @@ async function runCli() {
     tag,
     base_sha: baseSha,
     head_sha: headSha,
+    head_ref: headRef || undefined,
+    pr_kind: prKind,
     pr_number: prNumber > 0 ? prNumber : undefined,
     pr_url: prUrl || undefined,
     run_url: runUrl || undefined,
@@ -634,13 +653,17 @@ async function runCli() {
     writeFileSync(outMd, `${renderPrCommentMarkdown(report)}\n`, "utf8");
   }
 
-  const webhookResult = await postOpsWebhook({
-    webhookUrl: (process.env.OPS_RELEASE_WEBHOOK_URL || "").trim(),
-    webhookSecret: (process.env.OPS_RELEASE_WEBHOOK_SECRET || "").trim(),
-    payload: report,
-  });
-  if (!webhookResult.sent && webhookResult.reason !== "not_configured") {
-    console.warn(`::warning::Ops release webhook notification failed: ${webhookResult.reason}`);
+  if (shouldNotifyOpsWebhook({ mode, headRef, skipWebhook })) {
+    const webhookResult = await postOpsWebhook({
+      webhookUrl: (process.env.OPS_RELEASE_WEBHOOK_URL || "").trim(),
+      webhookSecret: (process.env.OPS_RELEASE_WEBHOOK_SECRET || "").trim(),
+      payload: report,
+    });
+    if (!webhookResult.sent && webhookResult.reason !== "not_configured") {
+      console.warn(`::warning::Ops release webhook notification failed: ${webhookResult.reason}`);
+    }
+  } else {
+    console.log(`Skipping Ops release webhook for non-release PR (pr_kind=${prKind}, head_ref=${headRef || "unknown"}).`);
   }
 }
 
