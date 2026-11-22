@@ -425,11 +425,16 @@ export async function postOpsWebhook({
 }
 
 export function renderPrCommentMarkdown(report) {
+  const isCustomDev = report.pr_kind === "custom_dev" || report.pr_kind === "internal";
   const verdictBadge =
     report.verdict === "safe"
-      ? "✅ SAFE（低风险，CI 全绿后可在 Ops 批准 Merge Commit）"
+      ? isCustomDev
+        ? "✅ SAFE（低风险，CI 全绿后合入 main 将由 Cloudflare 自动构建上线）"
+        : "✅ SAFE（低风险，CI 全绿后可在 Ops 批准 Merge Commit）"
       : report.verdict === "caution"
-        ? "⚠️ CAUTION（需人工复核关键改动后再在 Ops 批准合并）"
+        ? isCustomDev
+          ? "⚠️ CAUTION（涉及关键路径或增量迁移，请人工复核代码与 CI 后合入 main）"
+          : "⚠️ CAUTION（需人工复核关键改动后再在 Ops 批准合并）"
         : "🛑 BLOCK（存在阻断风险或不可逆迁移，请人工排查后再决定）";
 
   const dbBadge =
@@ -444,9 +449,13 @@ export function renderPrCommentMarkdown(report) {
       ? report.attention_files.map((f) => `- \`${f}\``).join("\n")
       : "- （无重点高危文件）";
 
+  const footerNote = isCustomDev
+    ? `> 本 PR 属于 **NeedToken 自研二开变更**（不会触发 Ops 官方升级待审报警）；合入 \`main\` 后将由 Cloudflare Workers Builds 自动发布上线。`
+    : `> 合并上游同步 PR 时请务必在 Ops 或 GitHub 使用 **Create a merge commit**，严禁 Squash 或 Rebase。`;
+
   return [
     COMMENT_MARKER,
-    `### NeedToken Ops 影响评估与 AI 风险研判（${report.module}）`,
+    `### NeedToken Ops 影响评估与 AI 风险研判（${report.module}${isCustomDev ? " · 自研二开" : ""}）`,
     "",
     `- **综合判定**：${verdictBadge}`,
     `- **数据库迁移风险**：${dbBadge}`,
@@ -469,18 +478,18 @@ export function renderPrCommentMarkdown(report) {
     `#### 操作建议`,
     report.recommendation_zh,
     "",
-    `> 合并上游同步 PR 时请务必在 Ops 或 GitHub 使用 **Create a merge commit**，严禁 Squash 或 Rebase。`,
+    footerNote,
   ].join("\n");
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (!arg.startsWith("--")) continue;
     const key = arg.slice(2);
     const next = argv[i + 1];
-    if (next && !next.startsWith("--")) {
+    if (next !== undefined && !next.startsWith("--")) {
       out[key] = next;
       i += 1;
     } else {
@@ -488,6 +497,15 @@ function parseArgs(argv) {
     }
   }
   return out;
+}
+
+export function normalizeReleaseTag(rawTag) {
+  const clean = String(rawTag || "").trim();
+  if (!clean) return "";
+  if (["true", "false", "null", "undefined", "none"].includes(clean.toLowerCase())) {
+    return "";
+  }
+  return clean;
 }
 
 function safeGit(args) {
@@ -510,13 +528,41 @@ export function classifyReleasePRKind(headRef, mode = "pr") {
   const ref = String(headRef || "").trim();
   if (ref.startsWith("sync/upstream/")) return "upstream_sync";
   if (ref.startsWith("rollback/")) return "rollback";
-  return "internal";
+  return "custom_dev";
 }
 
-export function shouldNotifyOpsWebhook({ mode = "pr", headRef = "", skipWebhook = false } = {}) {
+export function shouldNotifyOpsWebhook({ mode = "pr", skipWebhook = false } = {}) {
   if (skipWebhook) return false;
-  const kind = classifyReleasePRKind(headRef, mode);
-  return kind === "upstream_sync" || kind === "rollback";
+  return ["pr", "opened", "conflict", "closed"].includes(mode);
+}
+
+export function buildPrClosedPayload({
+  moduleName,
+  repo = "",
+  upstreamRepo = "",
+  prNumber = 0,
+  prMerged = false,
+  mergeSha = "",
+  headSha = "",
+  headRef = "",
+  prUrl = "",
+}) {
+  return {
+    schema_version: 1,
+    event: "pr_closed",
+    module: moduleName,
+    repo,
+    upstream_repo: upstreamRepo || undefined,
+    pr_kind: classifyReleasePRKind(headRef, "pr"),
+    pr_state: prMerged ? "merged" : "closed",
+    pr_number: prNumber > 0 ? prNumber : undefined,
+    pr_url: prUrl || undefined,
+    head_sha: headSha || undefined,
+    merge_sha: mergeSha || undefined,
+    head_ref: headRef || undefined,
+    verdict: "safe",
+    generated_at: new Date().toISOString(),
+  };
 }
 
 async function runCli() {
@@ -525,9 +571,10 @@ async function runCli() {
   const moduleName = args.module || process.env.NEEDTOKEN_MODULE || "storefront";
   const repo = args.repo || process.env.GITHUB_REPOSITORY || "";
   const upstreamRepo = args["upstream-repo"] || process.env.UPSTREAM_REPO || "";
-  const tag = args.tag || process.env.UPSTREAM_TAG || "";
+  const tag = normalizeReleaseTag(args.tag ?? process.env.UPSTREAM_TAG ?? "");
   const baseSha = args["base-sha"] || process.env.BASE_SHA || "";
   const headSha = args["head-sha"] || process.env.HEAD_SHA || "";
+  const mergeSha = args["merge-sha"] || process.env.MERGE_SHA || "";
   const headRef = args["head-ref"] || process.env.HEAD_REF || "";
   const prKind = classifyReleasePRKind(headRef, mode);
   const skipWebhook = args["skip-webhook"] === "true";
@@ -537,6 +584,32 @@ async function runCli() {
   const contractStatus = args["contract-status"] || process.env.CONTRACT_CHECK_STATUS || "unknown";
   const outJson = args["out-json"] || "ops-impact-report.json";
   const outMd = args["out-md"] || "";
+
+  if (mode === "closed") {
+    const closedPayload = buildPrClosedPayload({
+      moduleName,
+      repo,
+      upstreamRepo,
+      prNumber,
+      prMerged: String(args["pr-merged"] || process.env.PR_MERGED || "").toLowerCase() === "true",
+      mergeSha,
+      headSha,
+      headRef,
+      prUrl,
+    });
+    writeFileSync(outJson, `${JSON.stringify(closedPayload, null, 2)}\n`, "utf8");
+    if (shouldNotifyOpsWebhook({ mode, headRef, skipWebhook })) {
+      const webhookResult = await postOpsWebhook({
+        webhookUrl: (process.env.OPS_RELEASE_WEBHOOK_URL || "").trim(),
+        webhookSecret: (process.env.OPS_RELEASE_WEBHOOK_SECRET || "").trim(),
+        payload: closedPayload,
+      });
+      if (!webhookResult.sent && webhookResult.reason !== "not_configured") {
+        console.warn(`::warning::Ops release webhook close sync failed: ${webhookResult.reason}`);
+      }
+    }
+    return;
+  }
 
   let files = [];
   let highRiskFiles = [];
