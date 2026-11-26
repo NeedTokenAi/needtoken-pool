@@ -150,4 +150,72 @@ if grep -q "pulls/20/merge" "$tmp/gh.log"; then
   fail "migration file must block auto-merge"
 fi
 
+# 4. sync-upstream 在上游 tag 提交仍保留旧 VERSION 时，在双父 merge commit 内自动对齐 VERSION
+sync_tmp="$tmp/sync"
+mkdir -p "$sync_tmp/bin" "$sync_tmp/upstream_work" "$sync_tmp/work"
+git init --bare -q "$sync_tmp/upstream.git"
+git init --bare -q "$sync_tmp/origin.git"
+
+git -C "$sync_tmp/upstream_work" init -q -b main
+git -C "$sync_tmp/upstream_work" config user.name "Upstream"
+git -C "$sync_tmp/upstream_work" config user.email "upstream@example.test"
+mkdir -p "$sync_tmp/upstream_work/backend/cmd/server" "$sync_tmp/upstream_work/frontend/src/views"
+printf '0.2.25\n' >"$sync_tmp/upstream_work/backend/cmd/server/VERSION"
+printf '// v0.2.25\n' >"$sync_tmp/upstream_work/frontend/src/views/DashboardView.vue"
+git -C "$sync_tmp/upstream_work" add .
+git -C "$sync_tmp/upstream_work" commit -q -m "upstream v0.2.25"
+git -C "$sync_tmp/upstream_work" remote add origin "$sync_tmp/upstream.git"
+git -C "$sync_tmp/upstream_work" push -q origin main
+
+git clone -q "$sync_tmp/upstream.git" "$sync_tmp/work"
+git -C "$sync_tmp/work" remote set-url origin "$sync_tmp/origin.git"
+git -C "$sync_tmp/work" push -q origin main
+our_main_sha=$(git -C "$sync_tmp/work" rev-parse HEAD)
+
+printf '// v0.2.26 feature\n' >"$sync_tmp/upstream_work/frontend/src/views/DashboardView.vue"
+git -C "$sync_tmp/upstream_work" add .
+git -C "$sync_tmp/upstream_work" commit -q -m "feat: v0.2.26 without bumping VERSION"
+upstream_v26_sha=$(git -C "$sync_tmp/upstream_work" rev-parse HEAD)
+git -C "$sync_tmp/upstream_work" push -q origin main
+
+cat >"$sync_tmp/resolve.sh" <<EOS
+#!/usr/bin/env bash
+printf 'status=ok\nchannel=stable-tags\nmin_tag=v0.2.20\ntag=v0.2.26\nsha=%s\n' "$upstream_v26_sha"
+EOS
+chmod +x "$sync_tmp/resolve.sh"
+
+cat >"$sync_tmp/bin/gh" <<'EOS'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${1:-} == pr && ${2:-} == list ]]; then
+  exit 0
+fi
+if [[ ${1:-} == pr && ${2:-} == create ]]; then
+  printf 'https://example.test/pr/25\n'
+  exit 0
+fi
+exit 0
+EOS
+chmod +x "$sync_tmp/bin/gh"
+
+(
+  cd "$sync_tmp/work"
+  env PATH="$sync_tmp/bin:$PATH" \
+    GITHUB_REPOSITORY=NeedTokenAi/needtoken-pool \
+    UPSTREAM_URL="$sync_tmp/upstream.git" \
+    RESOLVE_UPSTREAM="$sync_tmp/resolve.sh" \
+    IMPACT_REVIEWER="$sync_tmp/missing-reviewer.mjs" \
+    SYNC_AUTH_MODE=pat \
+    bash "$root/sync-upstream.sh" >/dev/null
+)
+
+sync_branch="sync/upstream/${upstream_v26_sha}"
+synced_head=$(git -C "$sync_tmp/origin.git" rev-parse "refs/heads/${sync_branch}")
+synced_ver=$(git -C "$sync_tmp/origin.git" show "${synced_head}:backend/cmd/server/VERSION" | tr -d '\r\n')
+[[ $synced_ver == "0.2.26" ]] || fail "expected VERSION 0.2.26 in merge commit, got ${synced_ver}"
+synced_p1=$(git -C "$sync_tmp/origin.git" rev-parse "${synced_head}^1")
+synced_p2=$(git -C "$sync_tmp/origin.git" rev-parse "${synced_head}^2")
+[[ $synced_p1 == "$our_main_sha" ]] || fail "expected merge parent1 ${our_main_sha}, got ${synced_p1}"
+[[ $synced_p2 == "$upstream_v26_sha" ]] || fail "expected merge parent2 ${upstream_v26_sha}, got ${synced_p2}"
+
 echo "needtoken-pool upstream-sync ok"

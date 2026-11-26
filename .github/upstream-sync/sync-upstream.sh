@@ -321,7 +321,7 @@ git checkout --no-track -B "$branch" origin/main
 merge_msg="merge: upstream ${UPSTREAM_REPO} ${tag} (${upstream_sha})"
 merge_log=$(mktemp)
 set +e
-GIT_MERGE_AUTOEDIT=no git merge --no-ff "$upstream_sha" -m "$merge_msg" >"$merge_log" 2>&1
+GIT_MERGE_AUTOEDIT=no git merge --no-ff --no-commit "$upstream_sha" >"$merge_log" 2>&1
 merge_rc=$?
 set -e
 cat "$merge_log"
@@ -336,6 +336,20 @@ if [[ $merge_rc -ne 0 ]]; then
   exit 1
 fi
 rm -f "$merge_log"
+
+# 上游发布流水线打完 tag 后才回写 VERSION，容器构建排除 .git 后只能读取该文件，
+# 因此在合并提交中将 VERSION 显式对齐到当前同步的目标版本号。
+target_version=${tag#v}
+version_file="backend/cmd/server/VERSION"
+if [[ -f $version_file ]]; then
+  current_version=$(tr -d '\r\n' <"$version_file")
+  if [[ $current_version != "$target_version" ]]; then
+    printf '%s\n' "$target_version" >"$version_file"
+    git add "$version_file"
+  fi
+fi
+
+GIT_MERGE_AUTOEDIT=no git commit --no-edit -m "$merge_msg"
 
 git diff --quiet
 git diff --cached --quiet
