@@ -120,6 +120,12 @@ test("internal secret unlocks only glue/ops pool admin APIs while break-glass co
   for (const allowedInternal of [
     "/api/v1/admin/ops/account-availability",
     "/api/v1/admin/ops/concurrency",
+    "/api/v1/admin/ops/metadata",
+    "/api/v1/admin/channels/model-pricing?model=gpt-5",
+    "/api/v1/admin/dashboard/stats",
+    "/api/v1/admin/dashboard/groups",
+    "/api/v1/admin/dashboard/models",
+    "/api/v1/admin/users?page=1&page_size=20",
     "/api/v1/admin/accounts?page=1&page_size=200",
     "/api/v1/admin/accounts/12/chatgpt-inspection",
     "/api/v1/admin/accounts/12/test",
@@ -133,16 +139,36 @@ test("internal secret unlocks only glue/ops pool admin APIs while break-glass co
     assert.equal(res.allow, true, `expected internal allow for ${allowedInternal}`);
   }
 
-  for (const blockedWithInternalSecret of [
-    "/",
-    "/login",
-    "/admin",
-    "/api/v1/auth/login",
-    "/api/v1/admin/settings",
+  const balanceRes = await handleEdgeAdminGate(
+    new Request("https://pool.example/api/v1/admin/users/7/balance", { method: "POST", headers }),
+    env,
+    sql,
+  );
+  assert.equal(balanceRes.allow, true, "expected internal allow for POST /api/v1/admin/users/7/balance");
+
+  for (const publicBlocked of [
+    "/api/v1/admin/ops/metadata",
+    "/api/v1/admin/channels/model-pricing?model=gpt-5",
+    "/api/v1/admin/dashboard/stats",
     "/api/v1/admin/users",
+    "/api/v1/admin/users/7/balance",
   ]) {
-    const res = await handleEdgeAdminGate(new Request(`https://pool.example${blockedWithInternalSecret}`, { headers }), env, sql);
-    assert.equal(res.response?.status, 404, `expected 404 even with internal secret for ${blockedWithInternalSecret}`);
+    const res = await handleEdgeAdminGate(new Request(`https://pool.example${publicBlocked}`), env, sql);
+    assert.equal(res.response?.status, 404, `expected public 404 for ${publicBlocked}`);
+  }
+
+  for (const blockedWithInternalSecret of [
+    new Request("https://pool.example/", { headers }),
+    new Request("https://pool.example/login", { headers }),
+    new Request("https://pool.example/admin", { headers }),
+    new Request("https://pool.example/api/v1/auth/login", { headers }),
+    new Request("https://pool.example/api/v1/admin/settings", { headers }),
+    new Request("https://pool.example/api/v1/admin/users", { method: "POST", headers }),
+    new Request("https://pool.example/api/v1/admin/users/1", { method: "DELETE", headers }),
+    new Request("https://pool.example/api/v1/admin/dashboard/stats", { method: "POST", headers }),
+  ]) {
+    const res = await handleEdgeAdminGate(blockedWithInternalSecret, env, sql);
+    assert.equal(res.response?.status, 404, `expected 404 even with internal secret for ${blockedWithInternalSecret.method} ${blockedWithInternalSecret.url}`);
   }
 
   // Issue + redeem break-glass ticket -> holder can load SPA, assets, login, and admin settings; revoke immediately blocks.
