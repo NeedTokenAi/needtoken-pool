@@ -156,9 +156,10 @@ function matchesPrefix(lowerPath, prefix) {
 // Default-deny policy: sub2api has no public C-side users.
 // Only inference gateway routes + health are open publicly; exact glue/ops admin APIs
 // require the internal edge secret; all SPA pages, auth/user/payment/other admin routes 404.
-export function classifyPoolRequest(_method, normalized) {
+export function classifyPoolRequest(method, normalized) {
   if (!normalized.ok) return "invalid";
   const path = normalized.lower;
+  const upperMethod = String(method || "GET").toUpperCase();
 
   if (matchesPrefix(path, EDGE_CONTROL_PREFIX)) return "control";
 
@@ -176,6 +177,13 @@ export function classifyPoolRequest(_method, normalized) {
   if (
     path === "/api/v1/admin/ops/account-availability" ||
     path === "/api/v1/admin/ops/concurrency" ||
+    path === "/api/v1/admin/ops/metadata" ||
+    (path === "/api/v1/admin/channels/model-pricing" && upperMethod === "GET") ||
+    (path === "/api/v1/admin/dashboard/stats" && upperMethod === "GET") ||
+    (path === "/api/v1/admin/dashboard/groups" && upperMethod === "GET") ||
+    (path === "/api/v1/admin/dashboard/models" && upperMethod === "GET") ||
+    (path === "/api/v1/admin/users" && upperMethod === "GET") ||
+    (/^\/api\/v1\/admin\/users\/[0-9]+\/balance$/.test(path) && upperMethod === "POST") ||
     matchesPrefix(path, "/api/v1/admin/accounts") ||
     matchesPrefix(path, "/api/v1/admin/groups") ||
     matchesPrefix(path, "/api/v1/admin/proxies")
